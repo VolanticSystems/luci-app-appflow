@@ -1,0 +1,81 @@
+name: Build
+
+# Builds the luci-app-appflow .ipk/.apk via the official OpenWrt SDK action
+# (openwrt/gh-action-sdk). Evidence for the pattern below:
+#   - Action + env vars:  https://github.com/openwrt/gh-action-sdk (README + entrypoint.sh)
+#   - Real single-package luci-app repo using it the same way:
+#     https://github.com/ttimasdf/luci-app-xray/blob/main/.github/workflows/build.yml
+#   - SDK image tags (arch-version) confirmed to exist on Docker Hub:
+#     arm_cortex-a15_neon-vfpv4-25.12.5, aarch64_cortex-a53-25.12.5
+#     (https://hub.docker.com/r/openwrt/sdk/tags)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.arch }} (OpenWrt ${{ matrix.owrt }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Device under test — docs/DESIGN.md §2: Linksys EA8500, OpenWrt 25.12.5.
+          - arch: arm_cortex-a15_neon-vfpv4
+            owrt: 25.12.5
+          # Maintainer's production target class (aarch64, e.g. ipq807x/filogic boxes).
+          - arch: aarch64_cortex-a53
+            owrt: 25.12.5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Full history: gh-action-sdk diffs patches/ and shfmt's files/*.init
+          # against git when those dirs exist; harmless (and cheap) when they don't.
+          fetch-depth: 0
+
+      - name: Build luci-app-appflow via OpenWrt SDK
+        uses: openwrt/gh-action-sdk@v11
+        env:
+          # ARCH selects the openwrt/sdk container tag directly (Dockerfile:
+          # FROM $CONTAINER:$ARCH) — must be "<arch>-<openwrt-version>".
+          ARCH: ${{ matrix.arch }}-${{ matrix.owrt }}
+          # This repo IS the feed (LuCI-feed-style Makefile at repo root,
+          # `include $(TOPDIR)/feeds/luci/luci.mk`). Restricting to the one
+          # package name gives per-package download/check/compile steps
+          # instead of "build everything in the feed".
+          PACKAGES: luci-app-appflow
+          # Default is already 1; kept explicit since build.yml relies on it.
+          BUILD_LOG: 1
+
+      - name: Upload built packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-appflow-${{ matrix.arch }}-${{ matrix.owrt }}
+          # OpenWrt package format varies by branch/target (ipk historically,
+          # apk on newer targets) — glob both, per FEEDNAME=action default.
+          path: |
+            bin/packages/**/*.ipk
+            bin/packages/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.arch }}-${{ matrix.owrt }}
+          path: logs/
+          if-no-files-found: ignore
+          retention-days: 14

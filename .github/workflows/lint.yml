@@ -1,0 +1,131 @@
+name: Lint
+
+# Cheap, fast checks — no SDK container, no compile. Three independent jobs
+# so a failure in one doesn't block the others' feedback.
+#
+# JS approach mirrors openwrt/luci's own CI (.github/workflows/eslint.yml,
+# https://github.com/openwrt/luci — fetched 2026-08-21): ESLint 9 flat config,
+# sourceType 'script', LuCI runtime globals declared explicitly, no-undef
+# downgraded to 'warn' because LuCI's 'require "x"' pragma module system
+# can't be statically resolved by ESLint. Scaled down from their whole-repo,
+# diff-based, JS+JSON+MD lint to just this repo's one view-JS directory;
+# JSON validity is covered separately below instead of via @eslint/json.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: shellcheck (init.d / uci-defaults)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure shellcheck is available
+        run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+
+      - name: Run shellcheck
+        run: |
+          set -eu
+          shellcheck --version
+          # busybox ash is the actual runtime; shellcheck has no ash dialect,
+          # so "sh" (POSIX) is the closest available check. -S warning drops
+          # style/info nits so this gates on likely-real bashisms, not taste.
+          shellcheck -s sh -S warning \
+            root/etc/init.d/* \
+            root/etc/uci-defaults/*
+
+  json:
+    name: JSON validity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate every *.json file parses
+        run: |
+          set -eu
+          status=0
+          while IFS= read -r -d '' f; do
+            if node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$f"; then
+              echo "OK: $f"
+            else
+              echo "::error file=$f::invalid JSON"
+              status=1
+            fi
+          done < <(find . \( -name .git -o -name node_modules \) -prune -o -type f -name '*.json' -print0)
+          exit "$status"
+
+  js:
+    name: eslint (LuCI view JS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install ESLint
+        working-directory: ${{ runner.temp }}
+        run: npm install --no-audit --no-fund --no-save eslint@9 @eslint/js@latest
+
+      - name: Write LuCI-aware ESLint flat config
+        # Written to $RUNNER_TEMP, not into the repo: this workflow may only
+        # add files under .github/, so the config can't live at repo root.
+        run: |
+          cat > "${{ runner.temp }}/eslint.config.mjs" <<'EOF'
+          import js from '@eslint/js';
+
+          export default [
+            js.configs.recommended,
+            {
+              languageOptions: {
+                ecmaVersion: 'latest',
+                // LuCI view/resource JS is loaded as a classic script (via
+                // 'require "x"' pragma comments), not an ES module.
+                sourceType: 'script',
+                globals: {
+                  L: 'readonly', E: 'readonly', _: 'readonly', N_: 'readonly',
+                  baseclass: 'readonly', rpc: 'readonly', uci: 'readonly',
+                  ui: 'readonly', dom: 'readonly', poll: 'readonly',
+                  fs: 'readonly', network: 'readonly', firewall: 'readonly',
+                  form: 'readonly', session: 'readonly', request: 'readonly',
+                  validation: 'readonly', widgets: 'readonly', view: 'readonly',
+                  window: 'readonly', document: 'readonly', console: 'readonly'
+                }
+              },
+              rules: {
+                // LuCI's module loader injects the globals above at runtime;
+                // ESLint can't see that, so treat misses as warnings only.
+                'no-undef': 'warn',
+                'no-unused-vars': 'off',
+                'no-empty': 'off',
+                'no-prototype-builtins': 'off'
+              }
+            }
+          ];
+          EOF
+
+      - name: Run ESLint on LuCI view sources
+        run: |
+          set -eu
+          shopt -s nullglob
+          files=(htdocs/luci-static/resources/view/appflow/*.js)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No view JS files found, nothing to lint."
+            exit 0
+          fi
+          "${{ runner.temp }}/node_modules/.bin/eslint" \
+            --no-config-lookup \
+            --config "${{ runner.temp }}/eslint.config.mjs" \
+            "${files[@]}"
