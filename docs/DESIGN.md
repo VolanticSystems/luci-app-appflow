@@ -1,6 +1,6 @@
 # appflow — Design
 
-Status: DRAFT (pending GL-firmware reference spec, sections marked ⏳)
+Status: v1 spec LOCKED (2026-08-21). Remaining open items tracked in §8.
 
 ## 1. Goal
 
@@ -83,6 +83,20 @@ Counters are **cumulative per flow** → rates are computed by the consumer as
   file are eGloo-proprietary data shipped by the `netifyd` package. appflow
   reads them at runtime and **vendors none of this data** in the repo.
 
+### 2.4 Additional confirmed facts (research pass, 2026-08-21)
+
+- `flow_purge` events carry final counters plus `reason: closed|expired|
+  terminated`; the final delta must be accounted before flow removal.
+- netifyd 4.4.7 supports `dump_established_flows = yes` — on (re)connect a
+  client receives existing flows instead of starting blind. appflow ships an
+  idempotent uci-defaults script enabling it; the daemon additionally
+  tolerates `flow_stats` for unknown digests (stub entry, backfilled on the
+  next `flow` event).
+- App detections are `netify.<slug>` strings; protocol names are plain.
+- OpenWrt ships netifyd **4.4.7** while upstream is v5.x with a different
+  plugin architecture — all behavior here is pinned to 4.4.7-as-packaged.
+- netifyd bundles its own nDPI statically: `libndpi` is NOT a dependency.
+
 ## 3. Architecture
 
 ```
@@ -141,19 +155,43 @@ Flow table capped (default 4096 flows, uci-tunable); LRU-pruned on purge
 events, idle timeout, and cap pressure. Aggregates are O(apps + devices +
 categories), naturally small. No unbounded growth by construction.
 
-## 4. UI specification ⏳
+## 4. UI specification (locked 2026-08-21 against GL 4.9.1 stable teardown)
 
-Pending the GL firmware teardown (agent report). Committed structure so far:
+Reference: GL.iNet 4.9.1 "Flow Control → Data Statistics" screen, reverse-
+engineered from the shipped firmware (see scratch spec `GL-APPFLOW-SPEC.md`).
+Key reference facts: GL's screen is **range-based** (Past hour / Past day /
+Past week tabs over SQLite with tiered downsampling: native <1 h, 5-min buckets
+<26 h, daily to 8 days), polls every **15 s**, table columns are
+Application / Download / Upload / Total (sorted total desc, searchable,
+synthetic "All traffic" first row), a Top-10 bar chart, and a per-app detail
+drawer (app time series + per-client rows: name, MAC, last seen, share %).
+GL's engine is **netifyd itself** (cloud-license-gated); ours is the same
+engine with no license gate — classification is 100 % local in both.
 
-- **Overview**: live throughput chart (total + top-N apps), category donut,
-  top apps table (rate, session bytes, share), top devices table.
-- **Applications**: sortable table — app, category, rate ↓/↑, totals, flows,
-  first/last seen; expandable per-app device breakdown + hostnames.
-- **Devices**: per-device totals/rates; expandable per-device app breakdown.
-  Device names resolved via DHCP leases (`/tmp/dhcp.leases`) + status.json
-  MAC map.
-- Fidelity target: match GL 4.x information content; exceed it where the data
-  allows (categories, nDPI risk flags) without cluttering v1.
+appflow v1 ships two tabs:
+
+1. **Overview (live)** — our value-add; GL has no real-time view. Live total
+   throughput chart, top apps by current rate, category breakdown, top
+   devices. Poll 5 s.
+2. **Statistics (Past hour)** — GL-parity range view from in-RAM buckets
+   (12 × 5-min per app): Top-10 chart, the Application/Download/Upload/Total
+   table (sorted, searchable, "All traffic" row), per-app detail drawer with
+   12-point time series + per-device rows (name, MAC, last seen, DL/UL,
+   share %), and a Clear button (`reset`). Poll 15 s, matching GL.
+
+**Past day / Past week tabs are phase 2** (require persistence; the UI shows
+the tabs disabled with a tooltip, so the seam is visible but honest).
+
+Deliberate deviations from GL, documented as choices:
+- **No app icons.** GL's per-app icons/descriptions ship from their CDN and
+  are proprietary (netify/eGloo data). appflow renders letter-tile avatars
+  colored by category — zero licensing exposure, still scannable.
+- **No per-app Block toggle** (GL wires it to their content-filter product;
+  out of scope for a statistics package).
+- **No enable/disable toggle** — GL gates a heavy NFQUEUE pipeline; appflowd
+  is a lightweight socket consumer, service control via standard init.
+- Device names resolved from `/tmp/dhcp.leases` + netifyd status.json MAC map
+  (GL uses their proprietary client registry socket).
 
 ## 5. ubus contract (v1 draft)
 
@@ -164,9 +202,11 @@ Object `appflow`:
 | `summary` | – | totals, rates, top_apps[], top_categories[], top_devices[], window meta |
 | `apps` | `{sort, limit}` | full per-app aggregate list |
 | `devices` | – | per-device aggregates (+resolved names) |
-| `app_detail` | `{app}` | per-device + per-hostname breakdown for one app |
+| `app_detail` | `{app}` | per-device + per-hostname breakdown + hour time series for one app |
+| `stats` | `{range:"hour"}` | GL-parity range totals: all/applications[]/top_apps[] with 12×5-min time series (only `hour` in v1; other ranges rejected until phase 2) |
 | `flows` | `{limit}` | live flow list (debug/power-user view) |
 | `status` | – | daemon health: uptime, flows tracked, events/s, socket state |
+| `reset` | – | zero all aggregates/buckets (the "Clear" function; **write-scope ACL**, separate from read grants) |
 
 All byte values in **bytes**, rates in **bytes/sec** (UI formats). Timestamps
 ms epoch. Every response carries `generated_at` + `agent_connected`.
@@ -203,8 +243,8 @@ Depends: `netifyd`, `luci-base`, `luci-lib-chartjs`, `rpcd-mod-ucode` (opt. B),
 
 ## 8. Risks / open items
 
-- ⏳ GL reference spec (agent) — locks §4.
-- ⏳ netifyd conf details (agent): socket keepalive, multi-client behavior,
+- ~~GL reference spec~~ — landed 2026-08-21, §4 locked against GL 4.9.1 stable.
+- ~~netifyd conf details~~ — landed: multi-client listen socket, `dump_established_flows`,
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ucode `publish()` reliability → decides §3 option A/B.
 - Dual-capture dedup heuristic needs empirical validation (§3.2).
