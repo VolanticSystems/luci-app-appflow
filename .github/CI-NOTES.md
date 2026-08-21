@@ -14,11 +14,14 @@ openwrt/luci's own globals/no-undef-as-warn approach for LuCI view files).
 
 ## Unverified — these are drafted, not run
 Neither workflow has executed on GitHub yet. Most likely first-run break:
-`LUCI_DEPENDS` (netifyd, luci-lib-chartjs, rpcd-mod-ucode, ucode-mod-*)
-failing to resolve from the SDK's default feeds for 25.12.5 — the packages
-exist upstream, but feed resolution itself wasn't checked. Second: ghcr.io
-tags are assumed to mirror the Docker Hub tags I actually confirmed exist.
+`LUCI_DEPENDS` for the two packages actually built (`luci-app-appflow`:
+netifyd, luci-base, ucode-mod-socket, ucode-mod-uloop, ucode-mod-ubus,
+ucode-mod-uci, ucode-mod-fs; `luci-app-appflow-icons`: none) failing to
+resolve from the SDK's default feeds for 25.12.5; the packages exist
+upstream, but feed resolution itself wasn't checked. Second: ghcr.io tags
+are assumed to mirror the Docker Hub tags I actually confirmed exist.
 
-## Adding the icons package (`luci-app-appflow-icons`, roadmap §9) later
-Add it to `PACKAGES:` in build.yml (space-separated), e.g.
-`PACKAGES: luci-app-appflow luci-app-appflow-icons` — no other change needed.
+## The icons package (`luci-app-appflow-icons`, roadmap §9)
+Already wired into `PACKAGES:` in build.yml alongside the core package:
+`PACKAGES: luci-app-appflow luci-app-appflow-icons`. No further change
+needed for it to be built and uploaded by the same job.

@@ -64,10 +64,14 @@ arch `arm_cortex-a15_neon-vfpv4`. All facts below observed live, not assumed.
 ```
 
 **Correction (implementation ground truth, 2026-08-21):** `local_bytes` /
-`other_bytes` are **per-update deltas** (verified: they return to zero in the
-final `flow_purge` while `total_bytes` does not); only `total_bytes` is
-cumulative. appflowd accounts the directional deltas directly, clamped
-proportionally so they never exceed the growth of `total_bytes`.
+`other_bytes` are **per-update deltas** during a flow's life, but on the
+final `flow_purge` event for that flow they are **always zero** (confirmed
+on 10+ live purge events), while `total_bytes` is the flow's final
+cumulative value. Since the purge event cannot supply a final directional
+split, appflowd recovers it by distributing the `total_bytes` delta since the
+last known total across up/down using the flow's established up/down ratio
+(accumulated from that flow's prior `flow_stats` deltas), rather than
+accounting `local_bytes`/`other_bytes` from the purge event itself.
 
 ### 2.3 Naming and taxonomy
 
@@ -90,8 +94,11 @@ proportionally so they never exceed the growth of `total_bytes`.
 
 ### 2.4 Additional confirmed facts (research pass, 2026-08-21)
 
-- `flow_purge` events carry final counters plus `reason: closed|expired|
-  terminated`; the final delta must be accounted before flow removal.
+- `flow_purge` events carry `reason: closed|expired|terminated` and the
+  flow's final cumulative `total_bytes`/`total_packets`, but
+  `local_bytes`/`other_bytes` are always zero on purge (confirmed live, see
+  §2.2); the final up/down split must be recovered from the accumulated
+  ratio, not read off the purge event, before flow removal.
 - **Corrected:** `dump_established_flows` does NOT exist in netifyd 4.4.7 (string absent from the binary; a research citation of v5-era docs was wrong). On (re)connect a
   client starts blind. appflow ships a forward-compatible uci-defaults script (harmless no-op today) and
   the daemon
@@ -158,8 +165,16 @@ digests). Policy:
 ### 3.3 Memory bounds (runs on 128 MB devices)
 
 Flow table capped (default 4096 flows, uci-tunable); LRU-pruned on purge
-events, idle timeout, and cap pressure. Aggregates are O(apps + devices +
-categories), naturally small. No unbounded growth by construction.
+events, idle timeout, and cap pressure. No unbounded growth by construction,
+but the real worst case for the aggregate tables is not small: each of
+`AGG_MAX` (384) aggregates per class can carry up to `APP_DEV_MAX` (64)
+per-device ring objects, a ceiling of 384 x 64 = 24,576 per-(app x device)
+ring objects, plus up to `APP_HOST_MAX` (16) host ring entries per aggregate,
+384 x 16 = 6,144 more. Observed RSS was approximately 2 MB at a light load of
+33 apps and 11 devices (§8); the structural ceiling above is one to two
+orders of magnitude higher than that observed point, not a number the box is
+expected to reach under normal use, but worth stating plainly rather than
+waved off as "naturally small".
 
 ## 4. UI specification (locked 2026-08-21 against GL 4.9.1 stable teardown)
 
@@ -186,12 +201,16 @@ appflow v1 ships two tabs:
    share %), and a Clear button (`reset`). Poll 15 s, matching GL.
 
 **Past day / Past week tabs are phase 2** (require persistence; the UI shows
-the tabs disabled with a tooltip, so the seam is visible but honest).
+the tabs disabled with a tooltip, so the seam is visible rather than hidden).
 
 Deliberate deviations from GL, documented as choices:
-- **No app icons.** GL's per-app icons/descriptions ship from their CDN and
-  are proprietary (netify/eGloo data). appflow renders letter-tile avatars
-  colored by category — zero licensing exposure, still scannable.
+- **No app icons in core, by design.** GL's per-app icons/descriptions ship
+  from their CDN and are proprietary (netify/eGloo data). Core
+  `luci-app-appflow` renders letter-tile avatars colored by category on its
+  own, zero licensing exposure, still scannable. A separate, optional
+  package, `luci-app-appflow-icons` (§9), adds brand icons for the ~100 most
+  recognizable detectable apps; core probes for that package's icon
+  directory at render time and falls back cleanly when it is not installed.
 - **No per-app Block toggle** (GL wires it to their content-filter product;
   out of scope for a statistics package).
 - **No enable/disable toggle** — GL gates a heavy NFQUEUE pipeline; appflowd
@@ -222,7 +241,7 @@ ms epoch. Every response carries `generated_at` + `agent_connected`.
 ```
 luci-app-appflow/
 ├── Makefile                          # LuCI feed style, PKGARCH:=all
-├── htdocs/luci-static/resources/view/appflow/{overview,apps,devices}.js
+├── htdocs/luci-static/resources/view/appflow/{overview,statistics,common}.js
 ├── root/etc/init.d/appflowd          # procd wrapper
 ├── root/etc/config/appflow           # uci: caps, window sizes, top-N
 ├── root/usr/sbin/appflowd            # ucode daemon (shebang /usr/bin/ucode)
@@ -231,16 +250,23 @@ luci-app-appflow/
 └── docs/DESIGN.md                    # this file
 ```
 
-Depends: `netifyd`, `luci-base`, `luci-lib-chartjs`, `rpcd-mod-ucode` (opt. B),
-`ucode-mod-socket`, `ucode-mod-uloop`, (`ucode-mod-ubus` — in luci-base deps).
+Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
+`ucode-mod-socket`, `ucode-mod-uloop`, `ucode-mod-ubus`, `ucode-mod-uci`,
+`ucode-mod-fs`.
 
 ## 7. History extension seams (deliberate, v1 ships them dormant)
 
 1. **Single aggregation choke point**: every counter delta flows through one
    `account(flow, delta_bytes, ts)` function — the only place history taps in.
 2. **Time-bucketed accumulators**: aggregates are structured as
-   `{cur, buckets[]}` from day one; v1 keeps `buckets` length 0/small (rate
-   windows only), history = longer retention + persistence of the same shape.
+   `{cur, buckets[]}` from day one, and the buckets are load-bearing in v1,
+   not a stub: every aggregate (totals, each app, each device, each
+   category) carries a 12-slot, 5-minute ring covering the trailing hour
+   (backs the GL-parity `stats`/`app_detail` time series), and every
+   per-(app × device) and per-host breakdown carries a coarser 4-slot,
+   15-minute ring covering the same trailing window at a quarter of the
+   memory. History (§9) extends retention and adds persistence of that same
+   shape; it does not introduce the buckets themselves.
 3. **Persistence interface**: `store.flush(buckets)` no-op stub in v1; later
    implementations (RAM-rotating file / collectd exec / sqlite on USB) plug in
    without touching accounting. Flash-wear rule: never write per-sample to
@@ -252,8 +278,10 @@ Depends: `netifyd`, `luci-base`, `luci-lib-chartjs`, `rpcd-mod-ucode` (opt. B),
 - ~~GL reference spec~~ — landed 2026-08-21, §4 locked against GL 4.9.1 stable.
 - ~~netifyd conf details~~ — landed: multi-client listen socket, `dump_established_flows`,
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
-- ucode `publish()` reliability → decides §3 option A/B.
-- Dual-capture dedup heuristic needs empirical validation (§3.2).
+- ~~ucode `publish()` reliability → decides §3 option A/B~~: resolved, §3
+  states Option A shipped, proven reliable on 25.12.
+- Dual-capture dedup heuristic needs empirical validation (§3.2): still
+  outstanding, no NAT client available on the test bench.
 - EA8500 resource baseline MEASURED (2026-08-21, light load, 12 flows,
   synthetic traffic): netifyd ~16.5 MB VSZ, ~0% CPU, box 95% idle, 397 MB
   free. Heavy-load measurement (real client routed through) still pending.

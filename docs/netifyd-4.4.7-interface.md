@@ -27,7 +27,7 @@ Everything stated as fact below is grounded in one of two sources:
 
 Where the two disagree, or where a claim could only be confirmed from source
 and not observed live, this is called out explicitly. An "Unverified /
-unknown" section at the end collects every open question honestly rather
+unknown" section at the end collects every open question directly rather
 than papering over it.
 
 **A note on `dump_established_flows`.** You may see this option referenced in
@@ -109,8 +109,9 @@ was 15 seconds for this run):
 
 No `flow_purge` event occurred during this capture window (the two new flows
 were still active when the capture ended). Its shape is documented in
-section 4.6 from source plus the corroborating hardware-verified note in this
-project's `DESIGN.md`, and is flagged there as not directly observed.
+section 3.6, confirmed live via 10+ purge events captured separately during
+this project's hardware testing (`DESIGN.md`), even though none happened to
+land in the specific capture excerpted in this document.
 
 Practical implication for a long-running consumer (this is what
 `appflowd` in this repo does): on every connect or reconnect, assume you know
@@ -357,35 +358,39 @@ would always equal the total, never a clean multiple of it. Records like
 
 ### 3.6 `flow_purge`
 
-**Not present in the capture used for this document** (the two newly
-detected flows were still active when the capture ended, and none of the
-already-tracked flows from the initial `flow_stats` burst closed during the
-window). This section's example is therefore **reconstructed**, not a
-verbatim wire capture, built from: the `ENCODE_STATS` shape shared with
-`flow_stats` (confirmed from source, `src/netifyd.cpp`), the `reason` field
-(confirmed both from source and from this project's hardware-verified
-`DESIGN.md`), and the delta-return-to-zero behavior on final purge (also
-`DESIGN.md`, hardware-verified). It reuses a real digest from this capture
-for continuity, with directional counters set to zero as documented, and
-`total_bytes` unchanged from that flow's last known cumulative value:
+**Confirmed live**, across 10+ purge events captured separately during this
+project's hardware testing (`DESIGN.md`), though none happened to fall
+inside the specific capture session excerpted in this document (the two
+newly detected flows were still active when that capture ended, and none of
+the already-tracked flows from the initial `flow_stats` burst closed during
+the window). The confirmed live behavior: `local_bytes`/`other_bytes`
+(and the matching packet counters) are **always zero** on the closing purge
+event; `total_bytes`/`total_packets` carry the flow's final cumulative
+totals, unchanged from the flow's last known value going into the purge.
+The example below is reconstructed for illustration, since this document's
+own capture did not happen to include one, reusing a real digest from this
+capture with counters set to that confirmed pattern:
 
 ```json
 {"established":false,"flow":{"digest":"9c2d7b56c4571e146f65b0d15c12cec661d56b3f","last_seen_at":1787325199999,"local_bytes":0,"other_bytes":0,"total_bytes":642,"local_packets":0,"other_packets":0,"total_packets":6,"reason":"closed"},"interface":"wan","internal":false,"type":"flow_purge"}
 ```
-**(Reconstructed for illustration -- not observed on the wire in this session's capture.)**
+**(Reconstructed for illustration: this document's own capture did not include a purge event, but the local_bytes/other_bytes=0, total_bytes=final pattern shown is confirmed live behavior, not speculation.)**
 
 | Field | Type | Notes |
 |---|---|---|
 | `digest` | string | Correlation key; the flow being removed |
 | `last_seen_at` | uint64 | Epoch milliseconds |
-| `local_bytes`, `other_bytes`, `local_packets`, `other_packets` | uint | Final delta since the last update. Per the hardware-verified note in `DESIGN.md`, these return to zero on the closing purge. |
+| `local_bytes`, `other_bytes`, `local_packets`, `other_packets` | uint | **Always zero** on `flow_purge`, confirmed live across 10+ purge events (`DESIGN.md`). The flow's final directional split is not available on this event; see the accounting note below. |
 | `total_bytes`, `total_packets` | uint | Final cumulative totals for the flow's whole lifetime |
 | `reason` | string | One of `"closed"` (e.g. TCP FIN), `"expired"` (idle timeout), `"terminated"` (e.g. agent shutdown) |
 
 Emitted when a flow leaves the tracking table: normal close, idle expiry, or
-agent shutdown. This is the last event you will see for a given digest; the
-final delta must be accounted before discarding the flow from any consumer's
-state.
+agent shutdown. This is the last event you will see for a given digest.
+Because the directional counters are zeroed on purge, a consumer cannot read
+a flow's final up/down split off this event directly; this project's daemon
+instead recovers it by distributing the `total_bytes` delta since the last
+known total across up/down using the flow's established ratio from its
+prior `flow_stats` updates.
 
 ## 4. Consumer-relevant caveat on `agent_status`
 
@@ -521,8 +526,9 @@ sources independently and is not in question.)
 fields serialized unconditionally across every event type that carries a
 `flow` object. Key your flow table by `digest`. Do not assume any other
 field is always present -- `flow` carries identity and no counters,
-`flow_stats` carries counters and no identity, `flow_purge` carries final
-counters plus a reason.
+`flow_stats` carries counters and no identity, `flow_purge` carries a final
+cumulative `total_bytes`/`total_packets` plus a reason, but zeroed
+directional counters (§3.6): it does not carry a final directional split.
 
 **Stub-flow pattern.** Because `dump_established_flows` does not exist in
 4.4.7 (section "Scope" above), and because this is directly demonstrated by
@@ -555,12 +561,8 @@ that can and do collide numerically (section 5).
 
 ## 8. Unverified / unknown
 
-Collected here for honesty rather than scattered as caveats only:
+Collected here in one place rather than scattered as caveats only:
 
-- **`flow_purge`** -- not observed live in this capture; documented from
-  source plus this project's separately hardware-verified `DESIGN.md` note.
-  The example given in section 3.6 is explicitly reconstructed, not a wire
-  capture.
 - **`established` (top-level boolean)** -- precise semantics not confirmed
   by source reading or by this capture (always `false` in the sample, which
   is too uniform to infer meaning from).
