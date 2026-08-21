@@ -1,0 +1,48 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 VolanticSystems
+#
+# Ask the Netify Agent to dump established flows to every newly connected JSON
+# export client. Without it, a client that connects while flows are already in
+# progress receives counter updates for flows it never saw announced, and those
+# bytes can only be filed under "Unknown" until the flow ends.
+#
+# Idempotent: the option is appended once and the file is otherwise untouched
+# (netifyd.conf is hand-maintained, not generated from uci).
+#
+# Note: netifyd 4.4.7 (OpenWrt 25.12) does not implement this key -- the string
+# is absent from the binary -- and simply ignores it. appflowd therefore also
+# handles the no-dump case by filing counter updates for flows it never saw
+# announced under "Unknown". Writing the option anyway costs nothing and makes
+# the agent behave correctly as soon as a version that supports it is
+# installed.
+
+CONF=/etc/netifyd.conf
+OPT=dump_established_flows
+
+[ -f "$CONF" ] || exit 0
+
+if grep -qE "^[[:space:]]*${OPT}[[:space:]]*=" "$CONF"; then
+	exit 0
+fi
+
+TMP="${CONF}.appflow.$$"
+awk -v opt="$OPT" '
+	{ print }
+	/^[[:space:]]*\[netifyd\][[:space:]]*$/ && !done { print opt " = yes"; done = 1 }
+	END { if (!done) printf "\n[netifyd]\n%s = yes\n", opt }
+' "$CONF" > "$TMP" || { rm -f "$TMP"; exit 0; }
+
+# Never leave a truncated agent config behind.
+if [ -s "$TMP" ]; then
+	mv "$TMP" "$CONF"
+else
+	rm -f "$TMP"
+	exit 0
+fi
+
+if [ -x /etc/init.d/netifyd ]; then
+	/etc/init.d/netifyd restart >/dev/null 2>&1
+fi
+
+exit 0

@@ -1,0 +1,25 @@
+{
+	"luci-app-appflow": {
+		"description": "Grant access to per-application traffic statistics",
+		"read": {
+			"ubus": {
+				"appflow": [
+					"summary",
+					"apps",
+					"devices",
+					"app_detail",
+					"flows",
+					"stats",
+					"status"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"appflow": [
+					"reset"
+				]
+			}
+		}
+	}
+}

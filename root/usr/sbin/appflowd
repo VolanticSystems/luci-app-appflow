@@ -1,0 +1,1553 @@
+#!/usr/bin/ucode
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 VolanticSystems
+//
+// appflowd — aggregate Netify Agent (netifyd) DPI flow events into live
+// per-application / per-device / per-category traffic statistics and serve
+// them over ubus.  See docs/DESIGN.md; section references below point there.
+//
+// Data path (§3):
+//   netifyd  --unix stream, length-framed JSON-->  appflowd  --ubus-->  LuCI
+//
+// Everything that counts a byte goes through account() (§7.1), which is the
+// single seam historical accounting will tap into.
+
+import * as fs from "fs";
+import * as uloop from "uloop";
+import * as ubus from "ubus";
+import * as socket from "socket";
+import { cursor } from "uci";
+
+/* ------------------------------------------------------------------ *
+ * Constants — the memory bounds of §3.3 live here.  Every table in the
+ * daemon is capped; nothing grows with uptime or traffic volume.
+ * ------------------------------------------------------------------ */
+
+const NAME = "appflowd";
+const VERSION = "1.0";
+
+const RX_CHUNK = 16384;          // bytes per recv()
+const RX_MAX = 262144;           // partial-line buffer ceiling; beyond this the
+                                 // peer is not speaking our protocol -> resync
+const RX_DRAIN_MAX = 64;         // recv() calls per readable event (fairness)
+
+const AGG_MAX = 384;             // max aggregates per class (apps/devices/cats)
+const APP_DEV_MAX = 64;          // devices tracked per application (LRU)
+const APP_HOST_MAX = 16;         // hostnames tracked per application (LRU)
+const UNKNOWN_TYPE_MAX = 16;     // distinct unhandled event types remembered
+const EVENT_TYPE_MAX = 24;       // distinct event types counted in status
+const FLOWS_REPLY_MAX = 200;     // hard ceiling for the flows[] ubus reply
+const LIST_REPLY_MAX = 200;      // hard ceiling for apps[]/devices[] replies
+
+// Trailing-hour time series (§7.2 buckets, GL-parity `stats` method):
+// 12 slots x 5 minutes.  Slot numbers are absolute (epoch_ms / SERIES_MS), so
+// a slot is self-describing and stale slots need no eager clearing.
+const SERIES_SLOTS = 12;
+const SERIES_MS = 300000;
+// Per (app x device) we only need trailing-hour *totals*, not a series, so a
+// coarser 4 x 15 min ring is used: same code path, quarter the memory.  The
+// window it reports is therefore 45-60 minutes rather than exactly 60.
+const DEVSER_SLOTS = 4;
+const DEVSER_MS = 900000;
+
+const PRUNE_MS = 15000;          // idle-flow / aggregate sweep interval
+const LEASE_TTL_MS = 30000;      // DHCP lease file re-read throttle (§4)
+const LOG_REPEAT_MS = 60000;     // identical-message log suppression window
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+
+const CATEGORY_FILE = "/etc/netify.d/netify-categories.json";
+const LEASE_FILE = "/tmp/dhcp.leases";
+const STATUS_FILE = "/var/run/netifyd/status.json";
+
+const CFG_DEFAULTS = {
+	socket_path: "/var/run/netifyd/netifyd.sock",
+	flow_max: 4096,
+	rate_window: 30,
+	top_n: 10,
+	idle_timeout: 300
+};
+
+// Any event type matching this and carrying flow.digest finalises a flow.
+// netifyd 4.4.7 emits "flow_purge"; the regex keeps a renamed or additional
+// event working without a code change (the dispatcher below is data-driven).
+const PURGE_RE = regexp("(purge|expire|delete|remove|terminat|close)", "i");
+
+/* ------------------------------------------------------------------ *
+ * State
+ * ------------------------------------------------------------------ */
+
+let cfg = {};
+
+let sock = null;                 // socket handle to netifyd
+let sock_fd = null;              // uloop fd handle
+let rxbuf = "";                  // partial line carry-over
+let connected = false;
+let backoff_ms = RECONNECT_MIN_MS;
+let retry_timer = null;
+
+let flows = {};                  // digest -> flow record
+let nflows = 0;
+let peers = {};                  // dedup index (§3.2): peerkey -> {i:digest,e:digest}
+
+let apps = {}, devs = {}, cats = {};
+let totals = null;               // aggregate covering everything
+
+let names = { app: {}, proto: {} };      // id -> netifyd tag (definitions event)
+let catnames = { app: {}, proto: {} };   // id -> category tag (categories file)
+
+let leases = { at: 0, mtime: -1, by_mac: {}, by_ip: {} };
+let router = { macs: {}, ips: {} };      // this router's own L2/L3 identities
+let agent = { version: null, uptime: 0, flow_count: 0, ts: 0 };
+
+let stats = {
+	events: 0, frames: 0, malformed: 0, unknown: 0, unknown_types: {},
+	by_type: {}, reconnects: 0, connect_fail: 0, purges: 0,
+	flows_seen: 0, flows_late: 0, flows_pruned: 0, flows_dropped: 0,
+	shadowed: 0, aggs_pruned: 0, rx_bytes: 0, resyncs: 0, sweeps: 0,
+	last_event_ms: 0, last_reset_ms: 0
+};
+
+let start_ms = 0;
+let start_mono = 0;
+let log_seen = {};
+// The published ubus object must stay referenced: dropping the last reference
+// lets ucode collect it, which unregisters the object from ubus.
+let ubus_obj = null;
+
+// Forward declarations.  ucode binds an identifier at compile time: one that
+// is still undeclared resolves to a global, while `function f()` further down
+// declares a local, so the call would find null.  connect/schedule_reconnect
+// are mutually recursive and prune() is used by the flow table above its own
+// definition, so those four are declared here and assigned below.
+let prune, connect, disconnect, schedule_reconnect;
+
+/* ------------------------------------------------------------------ *
+ * Small helpers
+ * ------------------------------------------------------------------ */
+
+function now_ms() {
+	let c = clock();
+	return c[0] * 1000 + int(c[1] / 1000000);
+}
+
+function mono_ms() {
+	let c = clock(true);
+	return c[0] * 1000 + int(c[1] / 1000000);
+}
+
+function num(v, def) {
+	if (v == null)
+		return def;
+	let n = int(v);
+	return (type(n) == "int") ? n : def;
+}
+
+function clampi(v, lo, hi) {
+	return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+
+// procd feeds our stdout to logd as daemon.info and our stderr as daemon.err
+// (see the init script), so route by severity and flush explicitly -- stdout
+// is block buffered when it is a pipe.
+function logmsg(level, fmt, ...args) {
+	let out = (level == "error") ? fs.stderr : fs.stdout;
+	out.write(sprintf("[%s] %s\n", level, sprintf(fmt, ...args)));
+	out.flush();
+}
+
+// Log at most one identical message per LOG_REPEAT_MS.  Reconnect churn while
+// netifyd is down must not turn into log spam.
+function logonce(key, level, fmt, ...args) {
+	let now = mono_ms();
+	if (log_seen[key] && (now - log_seen[key]) < LOG_REPEAT_MS)
+		return;
+	if (length(log_seen) > 32)
+		log_seen = {};
+	log_seen[key] = now;
+	logmsg(level, fmt, ...args);
+}
+
+/* ------------------------------------------------------------------ *
+ * Configuration (uci: /etc/config/appflow)
+ * ------------------------------------------------------------------ */
+
+function cfg_load() {
+	let s = {};
+	try {
+		s = cursor().get_all("appflow", "main") ?? {};
+	} catch (e) {
+		logmsg("warn", "uci: %s — using defaults", e);
+	}
+
+	cfg = {
+		socket_path: length(s.socket_path ?? "") ? s.socket_path : CFG_DEFAULTS.socket_path,
+		flow_max: clampi(num(s.flow_max, CFG_DEFAULTS.flow_max), 64, 65536),
+		rate_window: clampi(num(s.rate_window, CFG_DEFAULTS.rate_window), 5, 600),
+		top_n: clampi(num(s.top_n, CFG_DEFAULTS.top_n), 1, 100),
+		idle_timeout: clampi(num(s.idle_timeout, CFG_DEFAULTS.idle_timeout), 15, 86400)
+	};
+	cfg.rate_ms = cfg.rate_window * 1000;
+	cfg.idle_ms = cfg.idle_timeout * 1000;
+}
+
+/* ------------------------------------------------------------------ *
+ * Time-bucketed accumulators (§7.2)
+ *
+ * A ring of `n` slots, each tagged with its absolute slot number.  Writes are
+ * O(1) and self-invalidating: a slot whose tag is not in the trailing window
+ * is simply not counted, so no eager rotation is needed for correctness.  The
+ * periodic sweep below still clears stale slots so their bytes cannot be
+ * resurrected by a clock step and so status output stays cheap.
+ * ------------------------------------------------------------------ */
+
+function ring_new(n) {
+	let r = { s: [], d: [], u: [] };
+	for (let i = 0; i < n; i++) {
+		push(r.s, -1);
+		push(r.d, 0);
+		push(r.u, 0);
+	}
+	return r;
+}
+
+function ring_add(r, slot, n, up, down) {
+	let i = slot % n;
+	if (r.s[i] != slot) {
+		r.s[i] = slot;
+		r.d[i] = 0;
+		r.u[i] = 0;
+	}
+	r.d[i] += down;
+	r.u[i] += up;
+}
+
+function ring_total(r, slot, n) {
+	let d = 0, u = 0;
+	for (let i = 0; i < n; i++) {
+		if (r.s[i] > (slot - n) && r.s[i] <= slot) {
+			d += r.d[i];
+			u += r.u[i];
+		}
+	}
+	return [ d, u ];
+}
+
+function ring_series(r, slot, n, slot_ms) {
+	let out = [];
+	for (let k = n - 1; k >= 0; k--) {
+		let s = slot - k, i = s % n, ok = (r.s[i] == s);
+		push(out, {
+			ts: s * slot_ms,
+			download: ok ? r.d[i] : 0,
+			upload: ok ? r.u[i] : 0
+		});
+	}
+	return out;
+}
+
+function ring_sweep(r, slot, n) {
+	for (let i = 0; i < n; i++)
+		if (r.s[i] >= 0 && (r.s[i] <= (slot - n) || r.s[i] > slot)) {
+			r.s[i] = -1;
+			r.d[i] = 0;
+			r.u[i] = 0;
+		}
+}
+
+function ring_clear(r, n) {
+	for (let i = 0; i < n; i++) {
+		r.s[i] = -1;
+		r.d[i] = 0;
+		r.u[i] = 0;
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * Aggregates
+ *
+ * Shape is {cur, buckets} per §7.2: `cur` is the session accumulator plus a
+ * two-bucket sliding window used for the live rate, `buckets` is the hour-long
+ * time series.  History support (§7) extends `buckets`, nothing else.
+ * ------------------------------------------------------------------ */
+
+function agg_new(kind, key, name, now) {
+	return {
+		kind, key, name,
+		cur: { up: 0, down: 0, flows: 0, first: now, last: 0 },
+		// Sliding rate window: bytes land in the open bucket; when it ages past
+		// rate_window it becomes the closed bucket and a fresh one opens.  The
+		// reported rate spans closed+open, i.e. 1x-2x the window.  Chosen over
+		// an EWMA because netifyd delivers flow_stats in ~15 s bursts: an EWMA
+		// tuned tight enough to be live would oscillate between spike and zero,
+		// while this integrates each burst over a known interval.  Cost is O(1)
+		// memory and no per-second timer.
+		rate: { t0: now, up: 0, down: 0, pdt: 0, pup: 0, pdown: 0 },
+		buckets: ring_new(SERIES_SLOTS)
+	};
+}
+
+function agg_roll(a, now) {
+	let span = now - a.rate.t0;
+	if (span >= cfg.rate_ms) {
+		a.rate.pdt = span;
+		a.rate.pup = a.rate.up;
+		a.rate.pdown = a.rate.down;
+		a.rate.t0 = now;
+		a.rate.up = 0;
+		a.rate.down = 0;
+	}
+}
+
+function agg_rate(a, now) {
+	agg_roll(a, now);
+	// Floor the denominator at one window so a single burst cannot be reported
+	// as an impossibly high instantaneous rate.
+	let denom = a.rate.pdt + (now - a.rate.t0);
+	if (denom < cfg.rate_ms)
+		denom = cfg.rate_ms;
+	return [
+		int((a.rate.pup + a.rate.up) * 1000 / denom),
+		int((a.rate.pdown + a.rate.down) * 1000 / denom)
+	];
+}
+
+function agg_bump(a, up, down, now, slot) {
+	agg_roll(a, now);
+	a.cur.up += up;
+	a.cur.down += down;
+	a.cur.last = now;
+	a.rate.up += up;
+	a.rate.down += down;
+	ring_add(a.buckets, slot, SERIES_SLOTS, up, down);
+}
+
+function agg_reset(a, now) {
+	a.cur.up = 0;
+	a.cur.down = 0;
+	a.cur.first = now;
+	a.cur.last = 0;
+	a.rate = { t0: now, up: 0, down: 0, pdt: 0, pup: 0, pdown: 0 };
+	ring_clear(a.buckets, SERIES_SLOTS);
+}
+
+// Evict the least recently active zero-flow aggregate when a class is full.
+function agg_make(tbl, kind, key, name, now) {
+	let a = tbl[key];
+	if (a)
+		return a;
+
+	if (length(tbl) >= AGG_MAX) {
+		let victim = null, oldest = now + 1;
+		for (let k in tbl) {
+			let c = tbl[k];
+			if (c.cur.flows > 0)
+				continue;
+			if (c.cur.last < oldest) {
+				oldest = c.cur.last;
+				victim = k;
+			}
+		}
+		if (victim == null) {
+			// Every slot is backed by a live flow: refuse to grow (§3.3).
+			// Bytes still land in the totals, so the summary stays truthful.
+			logonce("aggfull", "warn", "%s table full (%d), not tracking %s",
+			        kind, AGG_MAX, key);
+			return null;
+		}
+		delete tbl[victim];
+		stats.aggs_pruned++;
+	}
+
+	a = agg_new(kind, key, name, now);
+	tbl[key] = a;
+	return a;
+}
+
+/* ------------------------------------------------------------------ *
+ * Per-application breakdowns (bounded): device totals and hostnames.
+ * ------------------------------------------------------------------ */
+
+function detail_dev(a, fr, up, down, now, dslot) {
+	if (!a.devs)
+		a.devs = {};
+	let e = a.devs[fr.dev_key];
+	if (!e) {
+		if (length(a.devs) >= APP_DEV_MAX) {
+			let victim = null, oldest = now + 1;
+			for (let k in a.devs)
+				if (a.devs[k].last < oldest) {
+					oldest = a.devs[k].last;
+					victim = k;
+				}
+			delete a.devs[victim];
+		}
+		e = { mac: fr.dev_mac, ip: fr.dev_ip, last: now, ring: ring_new(DEVSER_SLOTS) };
+		a.devs[fr.dev_key] = e;
+	}
+	if (fr.dev_ip)
+		e.ip = fr.dev_ip;
+	e.last = now;
+	ring_add(e.ring, dslot, DEVSER_SLOTS, up, down);
+}
+
+function detail_host(a, fr, up, down, now) {
+	if (!fr.host)
+		return;
+	if (!a.hosts)
+		a.hosts = {};
+	let e = a.hosts[fr.host];
+	if (!e) {
+		if (length(a.hosts) >= APP_HOST_MAX) {
+			let victim = null, oldest = now + 1;
+			for (let k in a.hosts)
+				if (a.hosts[k].last < oldest) {
+					oldest = a.hosts[k].last;
+					victim = k;
+				}
+			delete a.hosts[victim];
+		}
+		e = { up: 0, down: 0, last: now };
+		a.hosts[fr.host] = e;
+	}
+	e.up += up;
+	e.down += down;
+	e.last = now;
+}
+
+/* ------------------------------------------------------------------ *
+ * Persistence interface (§7.3)
+ *
+ * v1 ships this dormant on purpose.  A history implementation (RAM-rotating
+ * file, collectd exec, sqlite on USB) plugs in here without touching the
+ * accounting path.  Flash-wear rule: coarse buckets only, never per sample.
+ * ------------------------------------------------------------------ */
+
+const store = {
+	flush: function(_aggregates, _slot) {
+		// no-op in v1
+	}
+};
+
+/* ------------------------------------------------------------------ *
+ * THE accounting choke point (§7.1)
+ *
+ * Every byte appflowd ever counts passes through here, exactly once.
+ * `d_local` / `d_other` are netifyd's per-update directional deltas; the flow
+ * record knows which of the two endpoints is the attributed device, so:
+ *     upload   = bytes sent BY the device        (device side -> peer)
+ *     download = bytes sent TO the device        (peer -> device side)
+ * ------------------------------------------------------------------ */
+
+function account(fr, d_local, d_other, ts) {
+	if (fr.shadow)                     // deduplicated NAT twin (§3.2)
+		return;
+
+	let up = fr.dev_local ? d_local : d_other;
+	let down = fr.dev_local ? d_other : d_local;
+	if (up < 0) up = 0;
+	if (down < 0) down = 0;
+
+	fr.up += up;
+	fr.down += down;
+	fr.seen = ts;
+
+	if (up == 0 && down == 0)
+		return;
+
+	let slot = int(ts / SERIES_MS);
+	let dslot = int(ts / DEVSER_MS);
+
+	agg_bump(totals, up, down, ts, slot);
+	if (fr.a) {
+		agg_bump(fr.a, up, down, ts, slot);
+		detail_dev(fr.a, fr, up, down, ts, dslot);
+		detail_host(fr.a, fr, up, down, ts);
+	}
+	if (fr.d)
+		agg_bump(fr.d, up, down, ts, slot);
+	if (fr.c)
+		agg_bump(fr.c, up, down, ts, slot);
+
+	// History (§7) taps in exactly here: the buckets these bumps fill are what
+	// store.flush() drains once a persistent implementation exists.
+}
+
+/* ------------------------------------------------------------------ *
+ * Naming (§2.3)
+ * ------------------------------------------------------------------ */
+
+function title_case(s) {
+	let out = [];
+	for (let w in split(s, " "))
+		push(out, length(w) ? (uc(substr(w, 0, 1)) + substr(w, 1)) : w);
+	return join(" ", out);
+}
+
+// Netify application tags look like "netify.google-ads"; nDPI protocol tags
+// are already display-styled ("HTTP/S", "ZOOM", "WireGuard") and are kept
+// verbatim.
+function display_name(tag) {
+	if (!length(tag ?? ""))
+		return null;
+	if (substr(tag, 0, 7) != "netify.")
+		return tag;
+	let slug = substr(tag, 7);
+	slug = replace(slug, /[-_.]/g, " ");
+	return title_case(slug);
+}
+
+function load_categories() {
+	let raw;
+	try {
+		raw = fs.readfile(CATEGORY_FILE);
+	} catch (e) {
+		raw = null;
+	}
+	if (!raw) {
+		logonce("cats", "warn", "category names unavailable: %s", CATEGORY_FILE);
+		return;
+	}
+
+	let obj;
+	try {
+		obj = json(raw);
+	} catch (e) {
+		logmsg("warn", "%s: parse error: %s", CATEGORY_FILE, e);
+		return;
+	}
+
+	// The file maps tag -> id; we need id -> tag.  The far larger
+	// application_index / protocol_index member lists are deliberately not
+	// retained: flow events carry the category id directly.
+	for (let t in obj.application_tag_index ?? {})
+		catnames.app[obj.application_tag_index[t]] = t;
+	for (let t in obj.protocol_tag_index ?? {})
+		catnames.proto[obj.protocol_tag_index[t]] = t;
+}
+
+function load_leases(now) {
+	if (leases.at && (now - leases.at) < LEASE_TTL_MS)
+		return;
+	leases.at = now;
+
+	let st;
+	try {
+		st = fs.stat(LEASE_FILE);
+	} catch (e) {
+		st = null;
+	}
+	if (!st) {
+		leases.mtime = -1;
+		return;
+	}
+	if (st.mtime == leases.mtime)
+		return;
+	leases.mtime = st.mtime;
+
+	let raw;
+	try {
+		raw = fs.readfile(LEASE_FILE);
+	} catch (e) {
+		return;
+	}
+	if (!raw)
+		return;
+
+	let by_mac = {}, by_ip = {};
+	for (let line in split(raw, "\n")) {
+		let f = split(trim(line), /[ \t]+/);
+		// <expiry> <mac> <ip> <hostname> <clientid>
+		if (length(f) < 4 || f[3] == "*")
+			continue;
+		by_mac[lc(f[1])] = f[3];
+		by_ip[f[2]] = f[3];
+	}
+	leases.by_mac = by_mac;
+	leases.by_ip = by_ip;
+}
+
+function device_name(key, mac, ip, now) {
+	if (key == "router")
+		return "Router";
+	if (key == "unknown")
+		return "Unknown";
+	load_leases(now);
+	return leases.by_mac[mac ?? ""] ?? leases.by_ip[ip ?? ""] ?? (mac ?? ip ?? key);
+}
+
+/* ------------------------------------------------------------------ *
+ * Router identity — needed to tell "this box" from a client (§3.2).
+ * ------------------------------------------------------------------ */
+
+function router_learn(ifaces) {
+	if (type(ifaces) != "object")
+		return;
+	for (let ifname in ifaces) {
+		let i = ifaces[ifname];
+		if (length(i?.mac ?? ""))
+			router.macs[lc(i.mac)] = ifname;
+		for (let a in i?.addr ?? [])
+			router.ips[a] = ifname;
+	}
+}
+
+// netifyd publishes the same interface block in its status file; read it once
+// at start-up so attribution is correct before the first agent_status arrives.
+function router_bootstrap() {
+	let raw;
+	try {
+		raw = fs.readfile(STATUS_FILE);
+	} catch (e) {
+		return;
+	}
+	if (!raw)
+		return;
+	try {
+		router_learn(json(raw).interfaces);
+	} catch (e) {
+		// status.json is rewritten in place by netifyd; a torn read is normal
+	}
+}
+
+function is_router(mac, ip) {
+	return (length(mac ?? "") && router.macs[mac] != null) ||
+	       (length(ip ?? "") && router.ips[ip] != null);
+}
+
+/* ------------------------------------------------------------------ *
+ * Flow table (§3.2, §3.3)
+ * ------------------------------------------------------------------ */
+
+function peer_key(f) {
+	return sprintf("%d|%s|%d", num(f.ip_protocol, 0), f.other_ip ?? "?", num(f.other_port, 0));
+}
+
+function flow_detach(fr) {
+	if (fr.shadow)
+		return;
+	if (fr.a && fr.a.cur.flows > 0) fr.a.cur.flows--;
+	if (fr.d && fr.d.cur.flows > 0) fr.d.cur.flows--;
+	if (fr.c && fr.c.cur.flows > 0) fr.c.cur.flows--;
+}
+
+function flow_attach(fr) {
+	if (fr.shadow)
+		return;
+	if (fr.a) fr.a.cur.flows++;
+	if (fr.d) fr.d.cur.flows++;
+	if (fr.c) fr.c.cur.flows++;
+}
+
+function flow_drop(digest) {
+	let fr = flows[digest];
+	if (!fr)
+		return;
+	flow_detach(fr);
+	if (fr.pkey) {
+		let p = peers[fr.pkey];
+		if (p) {
+			if (p.i == digest) delete p.i;
+			if (p.e == digest) delete p.e;
+			if (p.i == null && p.e == null)
+				delete peers[fr.pkey];
+		}
+	}
+	delete flows[digest];
+	nflows--;
+}
+
+// Identify (or re-identify, on a detection update) an existing flow record.
+function flow_identify(fr, ev, f, now) {
+	let app_id = num(f.detected_application, 0);
+	let proto_id = num(f.detected_protocol, 0);
+
+	let key, label;
+	if (app_id > 0) {
+		key = "a" + app_id;
+		label = display_name(f.detected_application_name ?? names.app[app_id]);
+		fr.tag = f.detected_application_name ?? names.app[app_id];
+	} else if (proto_id > 0) {
+		key = "p" + proto_id;
+		label = display_name(f.detected_protocol_name ?? names.proto[proto_id]);
+		fr.tag = f.detected_protocol_name ?? names.proto[proto_id];
+	} else {
+		key = "unknown";
+		label = "Unknown";
+		fr.tag = "unknown";
+	}
+	if (!length(label ?? "")) {
+		label = display_name(f.detected_protocol_name ?? names.proto[proto_id]) ?? "Unknown";
+		if (!length(fr.tag ?? ""))
+			fr.tag = "unknown";
+	}
+
+	let cat = catnames.app[num(f.category?.application, -1)] ??
+	          catnames.proto[num(f.category?.protocol, -1)] ?? "unclassified";
+
+	if (length(f.host_server_name ?? ""))
+		fr.host = substr(f.host_server_name, 0, 63);
+
+	// Attribution (§3.2).  netifyd's "local"/"other" labels follow its own
+	// topology view, not ours, so decide which endpoint is *our* device:
+	//  - on an internal (LAN bridge) capture the device is the non-router side;
+	//  - on an external (WAN) capture our own box is the device and the peer is
+	//    upstream infrastructure, so the device is the router-owned side.
+	let lm = lc(f.local_mac ?? ""), om = lc(f.other_mac ?? "");
+	let rl = is_router(lm, f.local_ip), ro = is_router(om, f.other_ip);
+	let dev_local = ev.internal ? !(rl && !ro) : !(ro && !rl);
+	let dev_is_router = dev_local ? rl : ro;
+	let mac = dev_local ? lm : om;
+	let ip = dev_local ? f.local_ip : f.other_ip;
+	let dkey = dev_is_router ? "router" : (length(mac) ? mac : (ip ?? "unknown"));
+
+	if (fr.app_key == key && fr.cat_key == cat && fr.dev_key == dkey) {
+		if (!fr.dev_ip)
+			fr.dev_ip = ip;
+		return;                      // nothing structural changed
+	}
+
+	// Re-pointing an already-counted flow: bytes already attributed stay where
+	// they were (the accounting seam is append-only by design); only future
+	// bytes and the active-flow counts follow the new identity.
+	flow_detach(fr);
+	fr.app_key = key;
+	fr.app_name = label ?? "Unknown";
+	fr.cat_key = cat;
+	fr.dev_key = dkey;
+	fr.dev_mac = length(mac) ? mac : null;
+	fr.dev_ip = ip;
+	fr.dev_local = dev_local;
+	fr.a = agg_make(apps, "app", key, fr.app_name, now);
+	fr.d = agg_make(devs, "device", dkey, device_name(dkey, fr.dev_mac, ip, now), now);
+	fr.c = agg_make(cats, "category", cat, cat, now);
+	if (fr.d) {
+		fr.d.mac = fr.dev_mac;
+		// Keep the friendliest address for display: an interface usually has
+		// both, and an IPv4 address means more to a user than a link-local v6.
+		if (ip && (!fr.d.ip || (index(ip, ".") >= 0 && index(fr.d.ip, ".") < 0)))
+			fr.d.ip = ip;
+		fr.d.router = (dkey == "router");
+	}
+	if (fr.a) {
+		fr.a.tag = fr.tag;
+		fr.a.cat = cat;
+	}
+	flow_attach(fr);
+}
+
+function flow_new(digest, ev, f, now, late) {
+	if (nflows >= cfg.flow_max) {
+		prune(now, true);
+		if (nflows >= cfg.flow_max) {
+			stats.flows_dropped++;
+			return null;
+		}
+	}
+
+	let fr = {
+		digest,
+		iface: ev.interface ?? "?",
+		internal: (ev.internal == true),
+		nat: (f.ip_nat == true),
+		proto: num(f.ip_protocol, 0),
+		host: null, tag: null,
+		app_key: null, app_name: "Unknown", cat_key: "unclassified",
+		dev_key: "unknown", dev_mac: null, dev_ip: null, dev_local: true,
+		a: null, d: null, c: null,
+		up: 0, down: 0, total: 0,
+		start: num(f.first_seen_at, now), seen: now,
+		shadow: false, late: (late == true),
+		pkey: null
+	};
+	flows[digest] = fr;
+	nflows++;
+	stats.flows_seen++;
+	if (late)
+		stats.flows_late++;
+
+	// Dual-capture dedup (§3.2, heuristic — pending empirical validation with a
+	// NAT'd client).  Internal and external captures of the same client flow
+	// share the remote endpoint, so that is the join key.  When both exist the
+	// external NAT'd copy is shadowed: tracked, never counted.
+	if (length(f.other_ip ?? "")) {
+		let pk = peer_key(f);
+		fr.pkey = pk;
+		let p = peers[pk];
+		if (!p) {
+			p = {};
+			peers[pk] = p;
+		}
+		if (fr.internal) {
+			p.i = digest;
+			let twin = p.e ? flows[p.e] : null;
+			if (twin && !twin.shadow) {
+				flow_detach(twin);
+				twin.shadow = true;
+				stats.shadowed++;
+			}
+		} else {
+			p.e = digest;
+			if (fr.nat && p.i && flows[p.i]) {
+				fr.shadow = true;
+				stats.shadowed++;
+			}
+		}
+	}
+
+	flow_identify(fr, ev, f, now);
+	return fr;
+}
+
+/* ------------------------------------------------------------------ *
+ * Event handlers.  Dispatch is table-driven: adding or renaming an event
+ * type is a one-line change.
+ * ------------------------------------------------------------------ */
+
+function ev_hello(ev) {
+	agent.version = ev.agent_version ?? agent.version;
+	logmsg("info", "netify agent %s connected (%s)",
+	       agent.version ?? "?", ev.build_version ?? "");
+}
+
+function ev_definitions(ev) {
+	let na = 0, np = 0;
+	for (let e in ev.applications ?? []) {
+		if (e?.id == null) continue;
+		names.app[e.id] = e.tag;
+		na++;
+	}
+	for (let e in ev.protocols ?? []) {
+		if (e?.id == null) continue;
+		names.proto[e.id] = e.tag;
+		np++;
+	}
+	logmsg("info", "definitions: %d applications, %d protocols", na, np);
+}
+
+function ev_agent_status(ev) {
+	agent.version = ev.agent_version ?? agent.version;
+	agent.uptime = num(ev.uptime, agent.uptime);
+	agent.flow_count = num(ev.flow_count, 0);
+	agent.rss_kb = num(ev.maxrss_kb, 0);
+	agent.ts = num(ev.timestamp, 0) * 1000;
+	router_learn(ev.interfaces);
+	// ev.devices is netifyd's MAC -> IP[] map; used only to fill in an address
+	// for devices whose flows we have not seen an IP for yet.
+	for (let mac in ev.devices ?? {}) {
+		let d = devs[lc(mac)];
+		if (d && !d.ip)
+			d.ip = (ev.devices[mac] ?? [])[0];
+	}
+}
+
+function ev_flow(ev, f, now) {
+	let fr = flows[f.digest];
+	if (!fr) {
+		flow_new(f.digest, ev, f, now, false);
+		return;
+	}
+	fr.late = false;
+	flow_identify(fr, ev, f, now);
+}
+
+// flow_stats: digest + counters only.  local_bytes/other_bytes are *per-update
+// deltas* (verified on 4.4.7: they return to zero in the final flow_purge while
+// total_bytes, which is cumulative, does not), so they are accounted directly.
+// total_bytes is used only to bound a delta and to report the flow's lifetime
+// volume.
+function ev_flow_stats(ev, f, now) {
+	let fr = flows[f.digest];
+	if (!fr) {
+		// A flow that predates our connection (or netifyd without
+		// dump_established_flows).  Track it as Unknown so its bytes are not
+		// silently lost; identity follows if a flow event arrives later.
+		fr = flow_new(f.digest, ev, f, now, true);
+		if (!fr)
+			return;
+	}
+
+	let dl = num(f.local_bytes, 0), do_ = num(f.other_bytes, 0);
+	let tb = num(f.total_bytes, 0);
+	let dt = tb - fr.total;
+	if (dt < 0)
+		dt = tb;                     // netifyd counter reset
+	if (fr.total > 0 && (dl + do_) > dt) {
+		// Directional deltas can never exceed the growth of the cumulative
+		// counter; clamp proportionally if netifyd ever disagrees with itself.
+		let sum = dl + do_;
+		dl = int(dl * dt / sum);
+		do_ = dt - dl;
+	}
+	if (tb > 0)
+		fr.total = tb;
+
+	account(fr, dl, do_, now);
+}
+
+function ev_purge(ev, f, now) {
+	let fr = flows[f.digest];
+	stats.purges++;
+	if (!fr)
+		return;
+	// The purge event carries the flow's final counters: account them before
+	// the record goes away.
+	account(fr, num(f.local_bytes, 0), num(f.other_bytes, 0), now);
+	let tb = num(f.total_bytes, 0);
+	if (tb > fr.total)
+		fr.total = tb;
+	fr.reason = ev.reason ?? "purged";
+	flow_drop(f.digest);
+}
+
+const HANDLERS = {
+	agent_hello: ev_hello,
+	definitions: ev_definitions,
+	agent_status: ev_agent_status
+};
+
+const FLOW_HANDLERS = {
+	flow: ev_flow,
+	flow_stats: ev_flow_stats,
+	flow_purge: ev_purge
+};
+
+function dispatch(ev, now) {
+	let t = ev.type;
+	if (!length(t ?? "")) {
+		stats.malformed++;
+		return;
+	}
+
+	stats.events++;
+	if (stats.by_type[t] != null)
+		stats.by_type[t]++;
+	else if (length(stats.by_type) < EVENT_TYPE_MAX)
+		stats.by_type[t] = 1;
+	stats.last_event_ms = now;
+
+	let h = HANDLERS[t];
+	if (h) {
+		h(ev);
+		return;
+	}
+
+	let f = ev.flow;
+	if (type(f) == "object" && length(f.digest ?? "")) {
+		h = FLOW_HANDLERS[t];
+		if (h) {
+			h(ev, f, now);
+			return;
+		}
+		// Unknown but flow-scoped: a purge-ish name finalises the flow, which
+		// keeps a future netifyd rename from leaking flow records.
+		if (match(t, PURGE_RE)) {
+			ev_purge(ev, f, now);
+			return;
+		}
+	}
+
+	stats.unknown++;
+	if (stats.unknown_types[t] == null && length(stats.unknown_types) < UNKNOWN_TYPE_MAX)
+		stats.unknown_types[t] = 0;
+	if (stats.unknown_types[t] != null)
+		stats.unknown_types[t]++;
+}
+
+/* ------------------------------------------------------------------ *
+ * Wire protocol (§2.1): newline-delimited JSON, each payload preceded by a
+ * {"length": N} header line.
+ * ------------------------------------------------------------------ */
+
+function feed(line, now) {
+	if (!length(line))
+		return;
+
+	let ev;
+	try {
+		ev = json(line);
+	} catch (e) {
+		stats.malformed++;
+		logonce("badjson", "warn", "malformed event line (%d bytes): %s", length(line), e);
+		return;
+	}
+
+	if (type(ev) != "object") {
+		stats.malformed++;
+		return;
+	}
+
+	// Frame header: sole key "length".
+	if (ev.length != null && length(ev) == 1) {
+		stats.frames++;
+		return;
+	}
+
+	dispatch(ev, now);
+}
+
+function on_readable() {
+	let now = now_ms();
+
+	for (let i = 0; i < RX_DRAIN_MAX; i++) {
+		let data;
+		try {
+			data = sock.recv(RX_CHUNK, socket.MSG_DONTWAIT);
+		} catch (e) {
+			disconnect("recv error: " + e);
+			return;
+		}
+
+		if (data == null) {
+			let err = socket.error(true);
+			if (err == 11 || err == 4)       // EAGAIN / EINTR
+				return;
+			disconnect(sprintf("recv failed: %s", socket.error()));
+			return;
+		}
+
+		if (length(data) == 0) {
+			disconnect("netifyd closed the connection");
+			return;
+		}
+
+		stats.rx_bytes += length(data);
+		rxbuf += data;
+
+		if (length(rxbuf) > RX_MAX) {
+			// Never let a peer that stops sending newlines grow us without
+			// bound (§3.3).  Drop back to a line boundary and carry on.
+			stats.resyncs++;
+			logonce("rxmax", "warn", "receive buffer overflow, resyncing");
+			let cut = rindex(rxbuf, "\n");
+			rxbuf = (cut >= 0) ? substr(rxbuf, cut + 1) : "";
+		}
+
+		let parts = split(rxbuf, "\n");
+		rxbuf = parts[length(parts) - 1];
+		for (let n = 0; n < length(parts) - 1; n++)
+			feed(trim(parts[n]), now);
+
+		if (length(data) < RX_CHUNK)
+			return;
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * Connection management: start before netifyd, survive its restart.
+ * ------------------------------------------------------------------ */
+
+disconnect = function(why) {
+	if (sock_fd) {
+		try {
+			sock_fd.delete();
+		} catch (e) {
+			try { sock_fd.cancel(); } catch (e2) {}
+		}
+		sock_fd = null;
+	}
+	if (sock) {
+		try { sock.close(); } catch (e) {}
+		sock = null;
+	}
+	rxbuf = "";
+	if (connected) {
+		connected = false;
+		logmsg("warn", "disconnected: %s", why);
+	}
+	schedule_reconnect();
+};
+
+schedule_reconnect = function() {
+	if (retry_timer)
+		return;
+	retry_timer = uloop.timer(backoff_ms, function() {
+		retry_timer = null;
+		connect();
+	});
+	backoff_ms = clampi(backoff_ms * 2, RECONNECT_MIN_MS, RECONNECT_MAX_MS);
+};
+
+connect = function() {
+	try {
+		sock = socket.connect(cfg.socket_path);
+	} catch (e) {
+		sock = null;
+	}
+
+	if (!sock) {
+		stats.connect_fail++;
+		logonce("noconn", "warn", "waiting for netifyd on %s", cfg.socket_path);
+		schedule_reconnect();
+		return;
+	}
+
+	sock_fd = uloop.handle(sock, on_readable, uloop.ULOOP_READ);
+	connected = true;
+	backoff_ms = RECONNECT_MIN_MS;
+	stats.reconnects++;
+	router_bootstrap();
+	logmsg("info", "connected to %s", cfg.socket_path);
+};
+
+/* ------------------------------------------------------------------ *
+ * Housekeeping (§3.3)
+ * ------------------------------------------------------------------ */
+
+prune = function(now, force) {
+	let cutoff = now - cfg.idle_ms;
+	let dropped = 0;
+
+	for (let d in keys(flows)) {
+		let fr = flows[d];
+		if (fr && fr.seen < cutoff) {
+			flow_drop(d);
+			dropped++;
+		}
+	}
+
+	// Cap pressure: shed the least recently active tenth of the table.
+	if (force && nflows >= cfg.flow_max) {
+		let list = [];
+		for (let d in flows)
+			push(list, [ d, flows[d].seen ]);
+		sort(list, (a, b) => a[1] - b[1]);
+		let want = int(cfg.flow_max / 10) + 1;
+		for (let i = 0; i < want && i < length(list); i++) {
+			flow_drop(list[i][0]);
+			dropped++;
+		}
+	}
+
+	stats.flows_pruned += dropped;
+
+	// Aggregates with no live flows that have been silent for longer than the
+	// trailing-hour window carry no data anyone can still query.
+	let agg_cutoff = now - (SERIES_SLOTS * SERIES_MS) - 60000;
+	for (let tbl in [ apps, devs, cats ])
+		for (let k in keys(tbl)) {
+			let a = tbl[k];
+			let last = a.cur.last ? a.cur.last : a.cur.first;
+			if (a.cur.flows == 0 && last < agg_cutoff) {
+				delete tbl[k];
+				stats.aggs_pruned++;
+			}
+		}
+};
+
+function housekeeping() {
+	let now = now_ms();
+	stats.sweeps++;
+	let slot = int(now / SERIES_MS), dslot = int(now / DEVSER_MS);
+
+	prune(now, false);
+
+	// Advance the trailing-hour rings: clears slots that have fallen out of
+	// the window so nothing stale can be reported or retained.
+	ring_sweep(totals.buckets, slot, SERIES_SLOTS);
+	for (let tbl in [ apps, devs, cats ])
+		for (let k in tbl) {
+			ring_sweep(tbl[k].buckets, slot, SERIES_SLOTS);
+			for (let dk in tbl[k].devs ?? {})
+				ring_sweep(tbl[k].devs[dk].ring, dslot, DEVSER_SLOTS);
+		}
+
+	// §7.3 seam: v1 has no persistent buckets, so this hands over nothing.
+	store.flush(totals.buckets, slot);
+}
+
+/* ------------------------------------------------------------------ *
+ * ubus surface (§5)
+ * ------------------------------------------------------------------ */
+
+function rss_kb() {
+	let raw;
+	try {
+		raw = fs.readfile("/proc/self/status");
+	} catch (e) {
+		return 0;
+	}
+	let m = raw ? match(raw, /VmRSS:[ \t]*([0-9]+)/) : null;
+	return m ? int(m[1]) : 0;
+}
+
+function envelope(now) {
+	return { generated_at: now, agent_connected: connected };
+}
+
+function metrics(a, now) {
+	let r = agg_rate(a, now);
+	return {
+		bytes_up: a.cur.up,
+		bytes_down: a.cur.down,
+		bytes_total: a.cur.up + a.cur.down,
+		rate_up: r[0],
+		rate_down: r[1],
+		rate_total: r[0] + r[1],
+		flows: a.cur.flows,
+		first_seen: a.cur.first,
+		last_seen: a.cur.last ? a.cur.last : a.cur.first
+	};
+}
+
+function app_row(a, now) {
+	let e = metrics(a, now);
+	e.key = a.key;
+	e.name = a.name;
+	e.tag = a.tag ?? a.key;
+	return e;
+}
+
+function dev_row(a, now) {
+	let e = metrics(a, now);
+	e.key = a.key;
+	e.name = (a.key == "router") ? "Router" : device_name(a.key, a.mac, a.ip, now);
+	e.mac = a.mac;
+	e.ip = a.ip;
+	e.is_router = (a.router == true);
+	return e;
+}
+
+function cat_row(a, now) {
+	let e = metrics(a, now);
+	e.key = a.key;
+	e.name = a.name;
+	return e;
+}
+
+const SORTERS = {
+	rate: (a, b) => (b.rate_total - a.rate_total) || (b.bytes_total - a.bytes_total),
+	bytes: (a, b) => b.bytes_total - a.bytes_total,
+	up: (a, b) => b.bytes_up - a.bytes_up,
+	down: (a, b) => b.bytes_down - a.bytes_down,
+	flows: (a, b) => b.flows - a.flows,
+	last: (a, b) => b.last_seen - a.last_seen,
+	name: (a, b) => (a.name < b.name) ? -1 : ((a.name > b.name) ? 1 : 0)
+};
+
+function rows_of(tbl, rowfn, now, sortkey, limit) {
+	let out = [];
+	for (let k in tbl)
+		push(out, rowfn(tbl[k], now));
+	sort(out, SORTERS[sortkey ?? "rate"] ?? SORTERS.rate);
+	return (limit > 0 && length(out) > limit) ? slice(out, 0, limit) : out;
+}
+
+function find_app(want) {
+	if (!length(want ?? ""))
+		return null;
+	if (apps[want])
+		return apps[want];
+	let lw = lc(want);
+	for (let k in apps) {
+		let a = apps[k];
+		if (lc(a.tag ?? "") == lw || lc(a.name) == lw)
+			return a;
+	}
+	return null;
+}
+
+function m_summary(req) {
+	let now = now_ms();
+	let n = clampi(num(req.args?.limit, cfg.top_n), 1, LIST_REPLY_MAX);
+	let r = envelope(now);
+	r.window = cfg.rate_window;
+	r.totals = metrics(totals, now);
+	r.totals.flows = nflows;
+	r.top_apps = rows_of(apps, app_row, now, "rate", n);
+	r.top_devices = rows_of(devs, dev_row, now, "rate", n);
+	r.top_categories = rows_of(cats, cat_row, now, "rate", n);
+	r.counts = {
+		apps: length(apps),
+		devices: length(devs),
+		categories: length(cats),
+		flows: nflows
+	};
+	return r;
+}
+
+function m_apps(req) {
+	let now = now_ms();
+	let r = envelope(now);
+	r.window = cfg.rate_window;
+	r.apps = rows_of(apps, app_row, now, req.args?.sort,
+	                 clampi(num(req.args?.limit, LIST_REPLY_MAX), 1, LIST_REPLY_MAX));
+	r.total = length(apps);
+	return r;
+}
+
+function m_devices(req) {
+	let now = now_ms();
+	let r = envelope(now);
+	r.window = cfg.rate_window;
+	r.devices = rows_of(devs, dev_row, now, req.args?.sort,
+	                    clampi(num(req.args?.limit, LIST_REPLY_MAX), 1, LIST_REPLY_MAX));
+	r.total = length(devs);
+	return r;
+}
+
+function m_app_detail(req) {
+	let now = now_ms();
+	let a = find_app(req.args?.app);
+	let r = envelope(now);
+	if (!a) {
+		r.found = false;
+		r.app = req.args?.app;
+		return r;
+	}
+
+	let slot = int(now / SERIES_MS), dslot = int(now / DEVSER_MS);
+	r.found = true;
+	r.app = a.key;
+	r.tag = a.tag ?? a.key;
+	r.label = a.name;
+	r.metrics = metrics(a, now);
+	r.time_series = ring_series(a.buckets, slot, SERIES_SLOTS, SERIES_MS);
+
+	let ds = [];
+	for (let k in a.devs ?? {}) {
+		let e = a.devs[k];
+		let t = ring_total(e.ring, dslot, DEVSER_SLOTS);
+		push(ds, {
+			key: k,
+			mac: e.mac,
+			ip: e.ip,
+			name: device_name(k, e.mac, e.ip, now),
+			download: t[0],
+			upload: t[1],
+			total: t[0] + t[1],
+			last_seen: e.last
+		});
+	}
+	sort(ds, (x, y) => (y.total - x.total));
+	r.devices = ds;
+
+	let hs = [];
+	for (let h in a.hosts ?? {})
+		push(hs, {
+			host: h,
+			download: a.hosts[h].down,
+			upload: a.hosts[h].up,
+			total: a.hosts[h].down + a.hosts[h].up,
+			last_seen: a.hosts[h].last
+		});
+	sort(hs, (x, y) => (y.total - x.total));
+	r.hosts = hs;
+
+	return r;
+}
+
+function m_flows(req) {
+	let now = now_ms();
+	let want_app = req.args?.app, want_dev = req.args?.device;
+	let limit = clampi(num(req.args?.limit, 50), 1, FLOWS_REPLY_MAX);
+	let out = [];
+
+	for (let d in flows) {
+		let fr = flows[d];
+		if (length(want_app ?? "") && fr.app_key != want_app && fr.tag != want_app)
+			continue;
+		if (length(want_dev ?? "") && fr.dev_key != want_dev)
+			continue;
+		push(out, {
+			digest: substr(d, 0, 16),
+			app: fr.app_key,
+			app_name: fr.app_name,
+			category: fr.cat_key,
+			device: fr.dev_key,
+			device_name: device_name(fr.dev_key, fr.dev_mac, fr.dev_ip, now),
+			host: fr.host,
+			interface: fr.iface,
+			internal: fr.internal,
+			nat: fr.nat,
+			shadow: fr.shadow,
+			ip_protocol: fr.proto,
+			upload: fr.up,
+			download: fr.down,
+			bytes_total: fr.total,
+			first_seen: fr.start,
+			last_seen: fr.seen
+		});
+	}
+
+	sort(out, (x, y) => y.last_seen - x.last_seen);
+	let r = envelope(now);
+	r.total = length(out);
+	r.truncated = (length(out) > limit);
+	r.flows = r.truncated ? slice(out, 0, limit) : out;
+	return r;
+}
+
+// GL-parity trailing-hour view.  Only range "hour" exists in v1; the argument
+// is required so the contract can grow (day/week) without a breaking change.
+function m_stats(req) {
+	let range = req.args?.range ?? "hour";
+	if (range != "hour")
+		return ubus.STATUS_INVALID_ARGUMENT;
+
+	let now = now_ms();
+	let slot = int(now / SERIES_MS);
+	let r = envelope(now);
+	r.range = "hour";
+	r.range_start = (slot - SERIES_SLOTS + 1) * SERIES_MS;
+	r.range_end = now;
+
+	let t = ring_total(totals.buckets, slot, SERIES_SLOTS);
+	r.all = { download: t[0], upload: t[1], total: t[0] + t[1] };
+
+	let list = [];
+	for (let k in apps) {
+		let a = apps[k];
+		let at = ring_total(a.buckets, slot, SERIES_SLOTS);
+		if ((at[0] + at[1]) == 0 && a.cur.flows == 0)
+			continue;
+		push(list, {
+			app: a.tag ?? a.key,
+			key: a.key,
+			label: a.name,
+			// An application's category is a property of its flows; the
+			// aggregate carries the most recent one seen.
+			category: a.cat ?? null,
+			download: at[0],
+			upload: at[1],
+			total: at[0] + at[1],
+			active_flows: a.cur.flows
+		});
+	}
+	sort(list, (x, y) => y.total - x.total);
+
+	// Only the leaders carry a time series -- twelve buckets per application
+	// would dominate the reply for no benefit.
+	let top = [];
+	for (let i = 0; i < length(list) && i < 10; i++) {
+		let e = list[i];
+		push(top, {
+			app: e.app, key: e.key, label: e.label, category: e.category,
+			download: e.download, upload: e.upload, total: e.total,
+			active_flows: e.active_flows,
+			time_series: ring_series(apps[e.key].buckets, slot, SERIES_SLOTS, SERIES_MS)
+		});
+	}
+
+	r.applications = list;
+	r.top_apps = top;
+	return r;
+}
+
+function m_status(req) {
+	let now = now_ms();
+	let r = envelope(now);
+	r.version = VERSION;
+	r.uptime = int((mono_ms() - start_mono) / 1000);
+	r.started_at = start_ms;
+	r.socket = { path: cfg.socket_path, connected: connected, reconnects: stats.reconnects,
+	             connect_failures: stats.connect_fail };
+	r.config = { flow_max: cfg.flow_max, rate_window: cfg.rate_window,
+	             top_n: cfg.top_n, idle_timeout: cfg.idle_timeout };
+	r.flows = { tracked: nflows, seen: stats.flows_seen, late: stats.flows_late,
+	            pruned: stats.flows_pruned, dropped: stats.flows_dropped,
+	            shadowed: stats.shadowed, purged: stats.purges };
+	r.aggregates = { apps: length(apps), devices: length(devs),
+	                 categories: length(cats), pruned: stats.aggs_pruned };
+	r.events = { total: stats.events, frames: stats.frames, malformed: stats.malformed,
+	             unknown: stats.unknown, unknown_types: stats.unknown_types,
+	             by_type: stats.by_type, rx_bytes: stats.rx_bytes, resyncs: stats.resyncs,
+	             last_event_age_ms: stats.last_event_ms ? (now - stats.last_event_ms) : -1 };
+	r.agent = { version: agent.version, uptime: agent.uptime,
+	            flow_count: agent.flow_count, maxrss_kb: agent.rss_kb ?? 0,
+	            last_status_at: agent.ts };
+	r.housekeeping = { sweeps: stats.sweeps, interval_ms: PRUNE_MS };
+	r.memory = { rss_kb: rss_kb() };
+	r.last_reset = stats.last_reset_ms;
+	return r;
+}
+
+// "Clear" — zero every accumulator while keeping flow tracking intact, so the
+// numbers restart from now without losing the live flow context.
+function m_reset(req) {
+	let now = now_ms();
+	agg_reset(totals, now);
+	for (let tbl in [ apps, devs, cats ])
+		for (let k in tbl) {
+			agg_reset(tbl[k], now);
+			delete tbl[k].devs;
+			delete tbl[k].hosts;
+		}
+	for (let d in flows) {
+		flows[d].up = 0;
+		flows[d].down = 0;
+	}
+	stats.last_reset_ms = now;
+	logmsg("info", "statistics reset via ubus");
+	let r = envelope(now);
+	r.reset = true;
+	return r;
+}
+
+function ubus_publish(conn) {
+	return conn.publish("appflow", {
+		summary:    { call: m_summary,    args: { limit: 0 } },
+		apps:       { call: m_apps,       args: { sort: "", limit: 0 } },
+		devices:    { call: m_devices,    args: { sort: "", limit: 0 } },
+		app_detail: { call: m_app_detail, args: { app: "" } },
+		flows:      { call: m_flows,      args: { limit: 0, app: "", device: "" } },
+		stats:      { call: m_stats,      args: { range: "" } },
+		status:     { call: m_status,     args: {} },
+		reset:      { call: m_reset,      args: {} }
+	});
+	// Reserved for §7.4: history { since, until } — deliberately not published
+	// in v1 so the method name stays free for the persistent-store version.
+}
+
+/* ------------------------------------------------------------------ *
+ * main
+ * ------------------------------------------------------------------ */
+
+function main() {
+	start_ms = now_ms();
+	start_mono = mono_ms();
+
+	cfg_load();
+	totals = agg_new("total", "total", "Total", start_ms);
+	load_categories();
+	router_bootstrap();
+
+	uloop.init();
+
+	let conn;
+	try {
+		conn = ubus.connect();
+	} catch (e) {
+		logmsg("error", "ubus connect failed: %s", e);
+		exit(1);
+	}
+
+	try {
+		ubus_obj = ubus_publish(conn);
+	} catch (e) {
+		logmsg("error", "ubus publish failed: %s", e);
+		exit(1);
+	}
+
+	for (let sig in [ "SIGTERM", "SIGINT" ])
+		try {
+			uloop.signal(sig, function() { uloop.end(); });
+		} catch (e) {
+			// signal handling is a nicety; procd will SIGKILL if we ignore it
+		}
+
+	uloop.interval(PRUNE_MS, housekeeping);
+
+	logmsg("info", "%s %s started (flow_max=%d rate_window=%ds)",
+	       NAME, VERSION, cfg.flow_max, cfg.rate_window);
+	connect();
+
+	uloop.run();
+	uloop.done();
+
+	if (sock)
+		try { sock.close(); } catch (e) {}
+	logmsg("info", "exiting");
+}
+
+main();

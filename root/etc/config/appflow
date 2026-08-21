@@ -1,0 +1,18 @@
+config appflow 'main'
+	# Netify Agent JSON export socket (netifyd.conf: [socket] listen_path[0]).
+	option socket_path '/var/run/netifyd/netifyd.sock'
+
+	# Maximum concurrently tracked flows. The flow table is the daemon's only
+	# significant memory consumer; 4096 flows is roughly 3 MB of state.
+	option flow_max '4096'
+
+	# Sliding window, in seconds, behind the reported rates. netifyd delivers
+	# per-flow counters about every 15 s, so values below ~20 s make the rates
+	# jump between burst and idle rather than making them more responsive.
+	option rate_window '30'
+
+	# Default number of rows returned by the summary method.
+	option top_n '10'
+
+	# Drop a flow from the table after this many seconds without an update.
+	option idle_timeout '300'
