@@ -89,6 +89,11 @@ let retry_timer = null;
 
 let flows = {};                  // digest -> flow record
 let nflows = 0;
+// True once any internal (LAN-bridge) capture has been seen.  The single-count
+// shadow rule only trusts "the internal capture already counted this" when
+// internal capture is actually active; on an external-only netifyd setup it
+// must not shadow client flows or the dashboard would read near-zero.
+let saw_internal = false;
 
 let apps = {}, devs = {}, cats = {};
 let totals = null;               // aggregate covering everything
@@ -503,7 +508,14 @@ const BRAND_CAPS = {
 	"Openwrt": "OpenWrt", "Dns": "DNS", "Http": "HTTP", "Https": "HTTPS",
 	"Ssl": "SSL", "Tls": "TLS", "Ssh": "SSH", "Ntp": "NTP", "Vpn": "VPN",
 	"Cdn": "CDN", "Voip": "VoIP", "Tv": "TV", "Api": "API", "Ip": "IP",
-	"Iot": "IoT", "Ai": "AI", "Ads": "Ads"
+	"Iot": "IoT", "Ai": "AI", "Ads": "Ads",
+	// Brands whose own capitalization is word-internal, which single-letter
+	// Title Case cannot produce.
+	"Youtube": "YouTube", "Github": "GitHub", "Gitlab": "GitLab",
+	"Whatsapp": "WhatsApp", "Tiktok": "TikTok", "Paypal": "PayPal",
+	"Icloud": "iCloud", "Iphone": "iPhone", "Deepl": "DeepL",
+	"Openai": "OpenAI", "Openvpn": "OpenVPN", "Wireguard": "WireGuard",
+	"Bittorrent": "BitTorrent", "Speedtest": "Speedtest", "Steamos": "SteamOS"
 };
 
 function title_case(s) {
@@ -751,7 +763,11 @@ function flow_identify(fr, ev, f, now) {
 	// An external capture of a client flow is therefore its NAT twin and is
 	// shadowed.  Order-independent, and correct for OpenWrt's default autoconfig
 	// (internal=br-lan, external=wan); documented as such in DESIGN §3.2.
-	let want_shadow = (!fr.internal && !dev_is_router && !group);
+	// Guarded by saw_internal so an external-only netifyd (no -I) counts every
+	// flow instead of shadowing all client traffic to zero.
+	if (fr.internal)
+		saw_internal = true;
+	let want_shadow = (saw_internal && !fr.internal && !dev_is_router && !group);
 
 	if (fr.app_key == key && fr.cat_key == cat && fr.dev_key == dkey &&
 	    fr.shadow == want_shadow) {
@@ -906,10 +922,27 @@ function flow_update(fr, f, now) {
 		let dt = tb - fr.total;
 		if (dt < 0)
 			dt = tb;             // netifyd counter reset: treat tb as the delta
-		if ((dl + do_) > dt) {
-			let sum = dl + do_;
+		let sum = dl + do_;
+		if (sum > dt) {
+			// Directional deltas exceed the cumulative growth: clamp them down.
 			dl = (sum > 0) ? int(dl * dt / sum) : 0;
 			do_ = dt - dl;
+		} else if (sum == 0 && dt > 0) {
+			// The cumulative counter advanced but this update carries no
+			// directional bytes.  This is the flow_purge case on 4.4.7:
+			// local_bytes/other_bytes are always 0 there while total_bytes is
+			// final, so the bytes since the last flow_stats would otherwise be
+			// lost (a few percent of every flow).  Attribute dt in the same
+			// up/down proportion the flow has shown so far (account() maps
+			// local/other -> up/down by dev_local, so split in that frame),
+			// defaulting to download when the direction is not yet known.
+			let up_share = (fr.up + fr.down > 0) ? int(dt * fr.up / (fr.up + fr.down)) : 0;
+			let down_share = dt - up_share;
+			if (fr.up + fr.down == 0)
+				down_share = dt;                 // unknown: count as download
+			// local == up when dev_local, else local == down.
+			dl = fr.dev_local ? up_share : down_share;
+			do_ = fr.dev_local ? down_share : up_share;
 		}
 	} else if (tb <= 0) {
 		stats.no_total++;
