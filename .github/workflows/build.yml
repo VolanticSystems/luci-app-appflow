@@ -55,7 +55,7 @@ jobs:
           # `include $(TOPDIR)/feeds/luci/luci.mk`). Restricting to the one
           # package name gives per-package download/check/compile steps
           # instead of "build everything in the feed".
-          PACKAGES: luci-app-appflow
+          PACKAGES: luci-app-appflow luci-app-appflow-icons
           # Default is already 1; kept explicit since build.yml relies on it.
           BUILD_LOG: 1
 
