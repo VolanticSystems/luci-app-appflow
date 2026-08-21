@@ -191,6 +191,15 @@ and the twin would be dropped instead. Resolve by routing one real client
 through the box and comparing the Overview total against the interface byte
 counters, before changing the rule. ⏳
 
+**Related sub-case, now mitigated.** A pre-existing external flow captured only
+as a stub (`flow_stats` before any `flow` event) is identified once, before
+`saw_internal` latches, and would otherwise stay counted alongside its internal
+twin for its whole life, inflating the central total. `reshadow()` re-applies
+the shadow rule on later stats updates, closing that window to at most one stats
+interval. The residual sign question for an unidentifiable stub (a genuine NAT
+twin vs. pre-existing router-origin traffic, both landing in the "unknown"
+bucket) folds into the same bench test above.
+
 ### 3.3 Memory bounds (runs on 128 MB devices)
 
 Flow table capped (default 4096 flows, uci-tunable); LRU-pruned on purge
