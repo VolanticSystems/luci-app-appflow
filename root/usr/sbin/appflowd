@@ -782,12 +782,14 @@ function flow_identify(fr, ev, f, now) {
 	//
 	// NOT order-independent in the strict sense: saw_internal is a process-wide
 	// capability latch ("is any internal capture running"), not per-flow evidence
-	// of a specific twin.  A WAN-side client flow seen BEFORE the first internal
-	// event is counted; the same flow seen after is shadowed.  This is the
-	// intended mode test, correct for OpenWrt's default autoconfig
-	// (internal=br-lan, external=wan); the per-flow twin question, and the exact
-	// contents of local_mac/other_mac when ip_nat is set, remain the open
-	// bench-test item in DESIGN §3.2 / §8.
+	// of a specific twin.  A WAN-side flow identified BEFORE the first internal
+	// event is counted; the same flow after is shadowed.  Left there, a
+	// pre-existing external stub identified while saw_internal was still false
+	// would stay counted alongside its internal twin for its whole life (a real
+	// double-count of the central total, not a brief startup blip) -- reshadow()
+	// re-applies this rule on later stats updates to close that window.  The
+	// per-flow twin question, and the exact contents of local_mac/other_mac when
+	// ip_nat is set, remain the open bench-test item in DESIGN §3.2 / §8.
 	if (fr.internal)
 		saw_internal = true;
 	let want_shadow = (saw_internal && !fr.internal && !dev_is_router && !group);
@@ -836,6 +838,29 @@ function flow_identify(fr, ev, f, now) {
 		fr.a.cat = cat;
 	}
 	flow_attach(fr);
+}
+
+// Re-apply the single-count rule to a flow whose shadow decision was frozen at
+// creation.  flow_identify runs once per flow (at flow_new) and again only on a
+// `flow` event; a pre-existing external stub, created from flow_stats before any
+// internal event, is therefore identified with saw_internal still false, counted,
+// and never revisited -- so it double-counts against its internal twin for its
+// whole life.  Once saw_internal latches, such a flow is an external non-router
+// capture like any other and the shipping rule already says to shadow it; this
+// just enforces that rule for flows that predated the latch, closing the window
+// from "entire flow life" to "at most one stats interval".  It only ever tightens
+// (unshadowed -> shadowed), never resurrects.  The residual sign question for an
+// unidentifiable stub (a genuine NAT twin vs. pre-existing router-origin traffic,
+// both landing in the "unknown" bucket) is the same §3.2 bench-test item.
+function reshadow(fr) {
+	if (fr.shadow || !saw_internal || fr.internal)
+		return;
+	if (fr.dev_key == "router" || fr.dev_key == "multicast")
+		return;
+	flow_detach(fr);
+	fr.shadow = true;
+	fr.a = null; fr.d = null; fr.c = null;
+	stats.shadowed++;
 }
 
 function flow_new(digest, ev, f, now, late) {
@@ -996,6 +1021,7 @@ function ev_flow_stats(ev, f, now) {
 		if (!fr)
 			return;
 	}
+	reshadow(fr);                        // close the stale-shadow double-count
 	flow_update(fr, f, now);
 }
 
