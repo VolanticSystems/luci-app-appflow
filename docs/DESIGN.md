@@ -250,3 +250,20 @@ Depends: `netifyd`, `luci-base`, `luci-lib-chartjs`, `rpcd-mod-ucode` (opt. B),
 - Dual-capture dedup heuristic needs empirical validation (§3.2).
 - EA8500 is a 2-core 1.4 GHz box; DPI + daemon CPU under load to be measured
   before recommending on modest hardware.
+
+## 9. Roadmap (queued, post-v1)
+
+1. **v1.1 — `luci-app-appflow-icons`, a SEPARATE package.** Hand-curated mapping
+   (netify app id → icon) for the ~100 most-recognizable detectable apps, using
+   monochrome SVGs from CC0/Apache-licensed collections (simple-icons /
+   dashboard-icons), bundled locally, tinted by category color. Deliberately
+   split from core, i18n-style, for legal blast-radius isolation: brand icons
+   are trademarks regardless of collection license, so if anyone ever objects
+   the icon package is delisted on its own and core is untouched. Coupling is
+   runtime-soft in BOTH directions: core probes the icon directory at render
+   time and falls back to letter-tile avatars; the icon package depends on
+   nothing and breaks nothing when absent or removed. Same repo, second
+   package directory.
+2. **v2 — Past day / Past week ranges** (persistence per §7 seams; flash-wear
+   policy: coarse-bucket flushes only, tmpfs-first with periodic backup,
+   GL-style tiered downsampling).
