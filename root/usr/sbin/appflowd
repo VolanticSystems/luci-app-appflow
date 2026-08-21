@@ -477,10 +477,20 @@ function account(fr, d_local, d_other, ts) {
  * Naming (§2.3)
  * ------------------------------------------------------------------ */
 
+// Post-capitalization fixes for tokens where naive Title Case reads wrong.
+const BRAND_CAPS = {
+	"Openwrt": "OpenWrt", "Dns": "DNS", "Http": "HTTP", "Https": "HTTPS",
+	"Ssl": "SSL", "Tls": "TLS", "Ssh": "SSH", "Ntp": "NTP", "Vpn": "VPN",
+	"Cdn": "CDN", "Voip": "VoIP", "Tv": "TV", "Api": "API", "Ip": "IP",
+	"Iot": "IoT", "Ai": "AI", "Ads": "Ads"
+};
+
 function title_case(s) {
 	let out = [];
-	for (let w in split(s, " "))
-		push(out, length(w) ? (uc(substr(w, 0, 1)) + substr(w, 1)) : w);
+	for (let w in split(s, " ")) {
+		let t = length(w) ? (uc(substr(w, 0, 1)) + substr(w, 1)) : w;
+		push(out, BRAND_CAPS[t] ?? t);
+	}
 	return join(" ", out);
 }
 
@@ -1195,6 +1205,7 @@ function app_row(a, now) {
 	e.key = a.key;
 	e.name = a.name;
 	e.tag = a.tag ?? a.key;
+	e.category = a.cat ?? null;
 	return e;
 }
 
@@ -1485,15 +1496,18 @@ function m_reset(req) {
 }
 
 function ubus_publish(conn) {
+	// Every args policy accepts ubus_rpc_session: rpcd injects it into all
+	// LuCI-proxied calls, and an unknown typed field is rejected as EINVAL.
+	const SID = { ubus_rpc_session: "" };
 	return conn.publish("appflow", {
-		summary:    { call: m_summary,    args: { limit: 0 } },
-		apps:       { call: m_apps,       args: { sort: "", limit: 0 } },
-		devices:    { call: m_devices,    args: { sort: "", limit: 0 } },
-		app_detail: { call: m_app_detail, args: { app: "" } },
-		flows:      { call: m_flows,      args: { limit: 0, app: "", device: "" } },
-		stats:      { call: m_stats,      args: { range: "" } },
-		status:     { call: m_status,     args: {} },
-		reset:      { call: m_reset,      args: {} }
+		summary:    { call: m_summary,    args: { limit: 0, ...SID } },
+		apps:       { call: m_apps,       args: { sort: "", limit: 0, ...SID } },
+		devices:    { call: m_devices,    args: { sort: "", limit: 0, ...SID } },
+		app_detail: { call: m_app_detail, args: { app: "", ...SID } },
+		flows:      { call: m_flows,      args: { limit: 0, app: "", device: "", ...SID } },
+		stats:      { call: m_stats,      args: { range: "", ...SID } },
+		status:     { call: m_status,     args: { ...SID } },
+		reset:      { call: m_reset,      args: { ...SID } }
 	});
 	// Reserved for §7.4: history { since, until } — deliberately not published
 	// in v1 so the method name stays free for the persistent-store version.
