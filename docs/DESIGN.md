@@ -119,7 +119,8 @@ rpcd ACL (usr/share/rpcd/acl.d) gates LuCI session access
     ▼
 LuCI JS view (htdocs/…/view/appflow/*.js)
     • L.poll every 3–5 s → ubus call → render
-    • Chart.js (luci-lib-chartjs) for charts; standard LuCI tables/widgets
+    • hand-drawn inline SVG charts (theme-aware via CSS custom properties);
+      standard LuCI tables/widgets
 ```
 
 Two implementation options for the ubus surface:
@@ -273,3 +274,17 @@ Depends: `netifyd`, `luci-base`, `luci-lib-chartjs`, `rpcd-mod-ucode` (opt. B),
 2. **v2 — Past day / Past week ranges** (persistence per §7 seams; flash-wear
    policy: coarse-bucket flushes only, tmpfs-first with periodic backup,
    GL-style tiered downsampling).
+
+## 10. As-implemented contract notes (v1 final)
+
+§5 sketched the method set; the implemented field naming is authoritative:
+live aggregate rows use `bytes_up/bytes_down/bytes_total` +
+`rate_up/rate_down/rate_total` (+ `key/name/tag/category`), while the
+GL-parity `stats`/`app_detail` range views use `download/upload/total`,
+matching GL's own vocabulary for that screen. `status` is nested
+(`socket.*`, `flows.*`, `aggregates.*`, `agent.*`, `memory.*`).
+`app_detail` takes the aggregate `key` or the raw tag or the display
+label (resolver tries all three). The frontend ships normalisers for
+both dialects in `view/appflow/common.js`. luci-lib-chartjs was dropped:
+the packaged build is a Chart.js 1.x fragment (Doughnut/Pie only), and
+inline SVG follows LuCI theme variables, which canvas cannot.
