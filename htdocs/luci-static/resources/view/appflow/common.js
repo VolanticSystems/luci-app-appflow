@@ -1,5 +1,6 @@
 'use strict';
 'require baseclass';
+'require request';
 'require rpc';
 
 /*
@@ -44,15 +45,52 @@ var callStatus  = declare('status'),
 
 var STYLE_ID = 'appflow-style';
 
+/*
+ * Optional icon pack (DESIGN §9 soft coupling). The sibling package
+ * luci-app-appflow-icons installs a manifest plus SVGs under
+ * /luci-static/resources/appflow-icons/. Nothing here depends on it: the
+ * manifest is probed once per page load and, when it is absent, every tile
+ * stays a letter tile for the rest of the session.
+ *
+ *   iconMap === null   probe has not run yet
+ *   iconMap === {}     pack absent or unreadable, do not ask again
+ */
+var ICON_BASE = L.resource('appflow-icons'),
+    ICON_FILE = /^[A-Za-z0-9._-]+.svg$/,
+    iconMap = null,
+    iconProbe = null;
+
 /* Mid-luminance hues: white tile text is legible on every entry, and each
  * colour keeps enough contrast against both the white and the #222 page. */
 var PALETTE = [
 	'hsl(210,58%,46%)', 'hsl(150,50%,36%)', 'hsl(27,70%,46%)', 'hsl(280,40%,52%)',
 	'hsl(340,52%,50%)', 'hsl(190,55%,38%)', 'hsl(96,40%,38%)', 'hsl(256,44%,56%)',
-	'hsl(12,60%,50%)',  'hsl(172,45%,34%)', 'hsl(44,58%,40%)', 'hsl(318,36%,46%)'
+	'hsl(12,60%,50%)',  'hsl(172,45%,34%)', 'hsl(44,58%,40%)', 'hsl(318,36%,46%)',
+	'hsl(224,42%,58%)', 'hsl(84,38%,32%)',  'hsl(0,52%,46%)',   'hsl(300,30%,42%)',
+	'hsl(200,60%,32%)', 'hsl(62,42%,34%)'
 ];
 
-var NEUTRAL = 'hsl(0,0%,50%)';
+/*
+ * Hashing a category name into PALETTE is fine for a tile, but the doughnut
+ * legend uses the same colours as a key, and with ~32 netify category tags in
+ * 18 buckets collisions are common enough to be seen (web and social-media
+ * collided on the first live run). The tags that actually show up get a fixed
+ * slot so the legend is unambiguous; anything outside this list still hashes.
+ */
+var CATEGORY_SLOT = {
+	'web': 0,                  'os-software-updates': 1,  'networking': 2,
+	'infrastructure': 3,       'social-media': 4,         'messaging': 5,
+	'cdn': 6,                  'technology': 7,           'shopping': 8,
+	'financial': 9,            'business': 10,            'games': 11,
+	'file-sharing': 12,        'mail': 13,                'streaming-media': 14,
+	'advertiser': 15,          'voip': 16,                'news': 17
+};
+
+/* 'unclassified' is a real netify category; 'other' is our own roll-up of the
+ * slices past the top N. They are different things, so they get different
+ * greys rather than colliding in the doughnut legend. */
+var NEUTRAL = 'hsl(0,0%,50%)',
+    NEUTRAL_ROLLUP = 'hsl(0,0%,72%)';
 
 /* Netify category tags whose naive title-case reads badly. */
 var CATEGORY_LABELS = {
@@ -95,7 +133,11 @@ var A_DL   = [ 'download', 'bytes_down', 'rx_bytes', 'download_bytes', 'total_do
     A_DNAM = [ 'name', 'hostname', 'label', 'alias', 'device' ],
     A_SEEN = [ 'last_seen', 'last_seen_at', 'last_active', 'last_active_time', 'seen' ],
     A_TIME = [ 'ts', 't', 'time', 'timestamp', 'interval_start', 'start' ],
-    A_NFLOW = [ 'flows', 'active_flows', 'flow_count' ];
+    A_NFLOW = [ 'flows', 'active_flows', 'flow_count' ],
+    /* Raw netify detection tag: named 'tag' on the live aggregates and on
+     * app_detail, carried in 'app' on the range views. Icon lookups key off
+     * this, never off the display label. */
+    A_TAG   = [ 'tag', 'app' ];
 
 /* ------------------------------------------------------------------- css */
 
@@ -128,6 +170,9 @@ var CSS = '\
 .af-tile{display:inline-flex;align-items:center;justify-content:center;\
  width:26px;height:26px;flex:0 0 26px;border-radius:5px;color:#fff;\
  font-weight:600;font-size:12px;text-shadow:0 1px 1px rgba(0,0,0,.25)}\
+.af-tile.af-tile-icon{font-size:0}\
+.af-tile-img{width:64%;height:64%;object-fit:contain;display:block}\
+.af-tile-img.af-mono{filter:brightness(0) invert(1)}\
 .af-app{display:flex;align-items:center;gap:.6em;min-width:0}\
 .af-appname{min-width:0;overflow:hidden}\
 .af-applabel{display:block;overflow:hidden;text-overflow:ellipsis;\
@@ -323,6 +368,7 @@ return baseclass.extend({
 		t.label = label;
 		t.cat = this.str(raw, A_CAT);
 		t.host = this.str(raw, A_HOST);
+		t.tag = this.str(raw, A_TAG);
 		t.series = this.normSeries(raw ? (raw.time_series || raw.series) : null);
 
 		return t;
@@ -483,8 +529,14 @@ return baseclass.extend({
 	color: function(key) {
 		var s = String(key == null ? '' : key).toLowerCase();
 
-		if (!s.length || s == 'unclassified' || s == 'unknown' || s == 'other')
+		if (s == 'other')
+			return NEUTRAL_ROLLUP;
+
+		if (!s.length || s == 'unclassified' || s == 'unknown')
 			return NEUTRAL;
+
+		if (CATEGORY_SLOT[s] != null)
+			return PALETTE[CATEGORY_SLOT[s]];
 
 		var h = 0;
 
@@ -496,15 +548,92 @@ return baseclass.extend({
 
 	/* --------------------------------------------------------- primitives */
 
-	tile: function(label, category) {
-		var s = String(label || '').replace(/^[^0-9A-Za-z]+/, ''),
-		    ch = s.length ? s.charAt(0).toUpperCase() : '?';
+	/*
+	 * Probe the optional icon pack. Resolves either way and never rejects, so
+	 * callers can fold it into their load() without a catch: a missing pack is
+	 * the normal case, not an error.
+	 */
+	loadIcons: function() {
+		if (iconProbe != null)
+			return iconProbe;
 
-		return E('span', {
+		iconProbe = request.get(ICON_BASE + '/manifest.json', { cache: true })
+			.then(function(res) {
+				var map = res.ok ? res.json() : null;
+
+				iconMap = (map != null && typeof map == 'object') ? map : {};
+			})
+			.catch(function() {
+				iconMap = {};
+			});
+
+		return iconProbe;
+	},
+
+	/*
+	 * Resolve a netify tag to an icon. simple-icons ship as fill-less glyphs
+	 * that would render black on a coloured tile, so they are flagged for the
+	 * white-out filter; full-colour logos are left alone.
+	 */
+	iconFor: function(tag) {
+		var t = String(tag || '');
+
+		if (iconMap == null || !t.length)
+			return null;
+
+		var e = iconMap[t];
+
+		if (e == null || typeof e.file != 'string' || !ICON_FILE.test(e.file))
+			return null;
+
+		return {
+			url: ICON_BASE + '/svg/' + e.file,
+			mono: (e.source == 'simple-icons')
+		};
+	},
+
+	tile: function(label, category, tag) {
+		var s = String(label || '').replace(/^[^0-9A-Za-z]+/, ''),
+		    ch = s.length ? s.charAt(0).toUpperCase() : '?',
+		    icon = this.iconFor(tag),
+		    node = E('span', {
 			'class': 'af-tile',
 			'style': 'background:' + this.color(category || label),
 			'aria-hidden': 'true'
-		}, [ ch ]);
+		    }, [ ch ]);
+
+		if (icon == null)
+			return node;
+
+		/* The letter stays in the DOM behind font-size:0 and is only hidden once
+		 * the icon has actually decoded, so a cold cache shows a letter that
+		 * swaps to the logo rather than an empty coloured square, and a manifest
+		 * entry pointing at a file that is not installed keeps the letter. */
+		var img = E('img', {
+			'class': 'af-tile-img' + (icon.mono ? ' af-mono' : ''),
+			'src': icon.url,
+			'alt': '',
+			'load': function(ev) {
+				if (ev.target.parentNode)
+					ev.target.parentNode.classList.add('af-tile-icon');
+			},
+			'error': function(ev) {
+				var host = ev.target.parentNode;
+
+				if (host) {
+					host.removeChild(ev.target);
+					host.classList.remove('af-tile-icon');
+				}
+			}
+		});
+
+		node.appendChild(img);
+
+		/* already in cache: hide the letter now, before the first paint */
+		if (img.complete && img.naturalWidth > 0)
+			node.classList.add('af-tile-icon');
+
+		return node;
 	},
 
 	appCell: function(app, sub) {
@@ -513,7 +642,7 @@ return baseclass.extend({
 		/* Colour seed: the category when the payload carries one, so every app
 		 * in a category shares a tile colour; the stable app key otherwise. */
 		return E('div', { 'class': 'af-app' }, [
-			this.tile(app.label, app.cat || app.key || app.label),
+			this.tile(app.label, app.cat || app.key || app.label, app.tag),
 			E('div', { 'class': 'af-appname' }, [
 				E('span', { 'class': 'af-applabel', 'title': app.label }, [ app.label ]),
 				second ? E('span', { 'class': 'af-sub', 'title': second }, [ second ]) : ''

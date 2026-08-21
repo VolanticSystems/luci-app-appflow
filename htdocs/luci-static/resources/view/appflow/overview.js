@@ -45,7 +45,9 @@ return view.extend({
 	},
 
 	load: function() {
-		return this.fetch();
+		/* the icon pack is optional; loadIcons() resolves either way */
+		return Promise.all([ appflow.loadIcons(), this.fetch() ])
+			.then(function(r) { return r[1]; });
 	},
 
 	/* ------------------------------------------------------------ render */

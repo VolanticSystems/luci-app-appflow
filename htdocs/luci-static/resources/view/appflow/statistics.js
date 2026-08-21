@@ -43,7 +43,9 @@ return view.extend({
 	},
 
 	load: function() {
-		return this.fetch();
+		/* the icon pack is optional; loadIcons() resolves either way */
+		return Promise.all([ appflow.loadIcons(), this.fetch() ])
+			.then(function(r) { return r[1]; });
 	},
 
 	/* ------------------------------------------------------------ render */
@@ -377,7 +379,7 @@ return view.extend({
 
 		var body = [
 			E('div', { 'class': 'af-modal-head' }, [
-				appflow.tile(app.label, app.cat),
+				appflow.tile(app.label, app.cat, app.tag),
 				E('div', {}, [
 					E('h4', {}, [ app.label ]),
 					app.cat ? E('span', {
