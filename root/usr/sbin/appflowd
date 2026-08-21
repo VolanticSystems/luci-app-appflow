@@ -83,12 +83,12 @@ let sock = null;                 // socket handle to netifyd
 let sock_fd = null;              // uloop fd handle
 let rxbuf = "";                  // partial line carry-over
 let connected = false;
+let ever_connected = false;      // distinguishes the first connect from reconnects
 let backoff_ms = RECONNECT_MIN_MS;
 let retry_timer = null;
 
 let flows = {};                  // digest -> flow record
 let nflows = 0;
-let peers = {};                  // dedup index (§3.2): peerkey -> {i:digest,e:digest}
 
 let apps = {}, devs = {}, cats = {};
 let totals = null;               // aggregate covering everything
@@ -105,7 +105,7 @@ let stats = {
 	by_type: {}, reconnects: 0, connect_fail: 0, purges: 0,
 	flows_seen: 0, flows_late: 0, flows_pruned: 0, flows_dropped: 0,
 	shadowed: 0, aggs_pruned: 0, rx_bytes: 0, resyncs: 0, sweeps: 0,
-	last_event_ms: 0, last_reset_ms: 0
+	no_total: 0, last_event_ms: 0, last_reset_ms: 0
 };
 
 let start_ms = 0;
@@ -299,16 +299,28 @@ function agg_roll(a, now) {
 	}
 }
 
+// Pure: computes the rate WITHOUT rolling the window, so a read never mutates
+// state.  Two clients polling at different intervals (or a second browser tab)
+// must see identical numbers for identical traffic; the window is advanced only
+// by agg_bump and housekeeping.  Rolls are applied virtually here.
 function agg_rate(a, now) {
-	agg_roll(a, now);
+	let span = now - a.rate.t0;
+	let pdt, pup, pdown, cspan, cup, cdown;
+	if (span >= cfg.rate_ms) {          // window would have rolled
+		pdt = span; pup = a.rate.up; pdown = a.rate.down;
+		cspan = 0; cup = 0; cdown = 0;
+	} else {
+		pdt = a.rate.pdt; pup = a.rate.pup; pdown = a.rate.pdown;
+		cspan = span; cup = a.rate.up; cdown = a.rate.down;
+	}
 	// Floor the denominator at one window so a single burst cannot be reported
 	// as an impossibly high instantaneous rate.
-	let denom = a.rate.pdt + (now - a.rate.t0);
+	let denom = pdt + cspan;
 	if (denom < cfg.rate_ms)
 		denom = cfg.rate_ms;
 	return [
-		int((a.rate.pup + a.rate.up) * 1000 / denom),
-		int((a.rate.pdown + a.rate.down) * 1000 / denom)
+		int((pup + cup) * 1000 / denom),
+		int((pdown + cdown) * 1000 / denom)
 	];
 }
 
@@ -374,12 +386,18 @@ function detail_dev(a, fr, up, down, now, dslot) {
 	let e = a.devs[fr.dev_key];
 	if (!e) {
 		if (length(a.devs) >= APP_DEV_MAX) {
-			let victim = null, oldest = now + 1;
+			// Seed from the first candidate, not from `now`: a backwards clock
+			// step (routine on an RTC-less router after its first NTP sync) can
+			// push every stored `last` past now, which would leave victim null
+			// and grow the map unbounded.
+			let victim = null, oldest = null;
 			for (let k in a.devs)
-				if (a.devs[k].last < oldest) {
+				if (oldest == null || a.devs[k].last < oldest) {
 					oldest = a.devs[k].last;
 					victim = k;
 				}
+			if (victim == null)
+				return;              // cannot make room; do not exceed the cap
 			delete a.devs[victim];
 		}
 		e = { mac: fr.dev_mac, ip: fr.dev_ip, last: now, ring: ring_new(DEVSER_SLOTS) };
@@ -399,20 +417,23 @@ function detail_host(a, fr, up, down, now) {
 	let e = a.hosts[fr.host];
 	if (!e) {
 		if (length(a.hosts) >= APP_HOST_MAX) {
-			let victim = null, oldest = now + 1;
+			let victim = null, oldest = null;
 			for (let k in a.hosts)
-				if (a.hosts[k].last < oldest) {
+				if (oldest == null || a.hosts[k].last < oldest) {
 					oldest = a.hosts[k].last;
 					victim = k;
 				}
+			if (victim == null)
+				return;
 			delete a.hosts[victim];
 		}
-		e = { up: 0, down: 0, last: now };
+		// Same trailing-window ring as the device breakdown, so the two tables
+		// in the detail drawer report over the same interval and stay comparable.
+		e = { last: now, ring: ring_new(DEVSER_SLOTS) };
 		a.hosts[fr.host] = e;
 	}
-	e.up += up;
-	e.down += down;
 	e.last = now;
+	ring_add(e.ring, int(now / DEVSER_MS), DEVSER_SLOTS, up, down);
 }
 
 /* ------------------------------------------------------------------ *
@@ -590,16 +611,25 @@ function device_name(key, mac, ip, now) {
  * Router identity — needed to tell "this box" from a client (§3.2).
  * ------------------------------------------------------------------ */
 
+// Rebuild the router-identity maps wholesale from an interfaces block.  An
+// agent_status frame that carries `interfaces` is complete and authoritative,
+// so replacing rather than merging keeps these maps bounded (IPv6 privacy
+// addresses and WAN re-leases would otherwise accumulate stale entries for the
+// daemon's whole lifetime).  The reduced agent_status frame omits `interfaces`
+// entirely — guarded by the caller — and must not wipe what we know.
 function router_learn(ifaces) {
 	if (type(ifaces) != "object")
 		return;
+	let macs = {}, ips = {};
 	for (let ifname in ifaces) {
 		let i = ifaces[ifname];
 		if (length(i?.mac ?? ""))
-			router.macs[lc(i.mac)] = ifname;
+			macs[lc(i.mac)] = ifname;
 		for (let a in i?.addr ?? [])
-			router.ips[a] = ifname;
+			ips[a] = ifname;
 	}
+	router.macs = macs;
+	router.ips = ips;
 }
 
 // netifyd publishes the same interface block in its status file; read it once
@@ -625,13 +655,21 @@ function is_router(mac, ip) {
 	       (length(ip ?? "") && router.ips[ip] != null);
 }
 
+// IEEE 802 group addresses: IPv4 multicast (01:00:5e:*), IPv6 multicast
+// (33:33:*) and broadcast.  These are not devices — attributing them per
+// address would let any LAN host mint unbounded device aggregates by looping
+// over multicast groups, so they collapse into one pseudo-device.
+function is_group_mac(mac) {
+	if (!length(mac ?? ""))
+		return false;
+	return substr(mac, 0, 8) == "01:00:5e" ||
+	       substr(mac, 0, 5) == "33:33" ||
+	       mac == "ff:ff:ff:ff:ff:ff";
+}
+
 /* ------------------------------------------------------------------ *
  * Flow table (§3.2, §3.3)
  * ------------------------------------------------------------------ */
-
-function peer_key(f) {
-	return sprintf("%d|%s|%d", num(f.ip_protocol, 0), f.other_ip ?? "?", num(f.other_port, 0));
-}
 
 function flow_detach(fr) {
 	if (fr.shadow)
@@ -654,15 +692,6 @@ function flow_drop(digest) {
 	if (!fr)
 		return;
 	flow_detach(fr);
-	if (fr.pkey) {
-		let p = peers[fr.pkey];
-		if (p) {
-			if (p.i == digest) delete p.i;
-			if (p.e == digest) delete p.e;
-			if (p.i == null && p.e == null)
-				delete peers[fr.pkey];
-		}
-	}
 	delete flows[digest];
 	nflows--;
 }
@@ -709,9 +738,23 @@ function flow_identify(fr, ev, f, now) {
 	let dev_is_router = dev_local ? rl : ro;
 	let mac = dev_local ? lm : om;
 	let ip = dev_local ? f.local_ip : f.other_ip;
-	let dkey = dev_is_router ? "router" : (length(mac) ? mac : (ip ?? "unknown"));
+	let group = is_group_mac(mac) || is_group_mac(dev_local ? om : lm);
+	let dkey = group ? "multicast"
+	                 : (dev_is_router ? "router" : (length(mac) ? mac : (ip ?? "unknown")));
 
-	if (fr.app_key == key && fr.cat_key == cat && fr.dev_key == dkey) {
+	// Single-count each flow (§3.2).  With netifyd watching the LAN bridge
+	// (internal) and WAN (external) at once, a client's traffic is captured
+	// twice.  Rather than pair the two captures by a fragile remote-endpoint
+	// key, count deterministically: an internal capture is always the device's
+	// own copy, while an external capture is counted only when the device is
+	// the router itself (router-originated traffic never crosses the bridge).
+	// An external capture of a client flow is therefore its NAT twin and is
+	// shadowed.  Order-independent, and correct for OpenWrt's default autoconfig
+	// (internal=br-lan, external=wan); documented as such in DESIGN §3.2.
+	let want_shadow = (!fr.internal && !dev_is_router && !group);
+
+	if (fr.app_key == key && fr.cat_key == cat && fr.dev_key == dkey &&
+	    fr.shadow == want_shadow) {
 		if (!fr.dev_ip)
 			fr.dev_ip = ip;
 		return;                      // nothing structural changed
@@ -720,7 +763,17 @@ function flow_identify(fr, ev, f, now) {
 	// Re-pointing an already-counted flow: bytes already attributed stay where
 	// they were (the accounting seam is append-only by design); only future
 	// bytes and the active-flow counts follow the new identity.
-	flow_detach(fr);
+	flow_detach(fr);                     // uses the OLD shadow state
+	if (want_shadow && !fr.shadow)
+		stats.shadowed++;
+	fr.shadow = want_shadow;
+	if (fr.shadow) {                     // a shadowed twin tracks nothing
+		fr.app_key = key; fr.cat_key = cat; fr.dev_key = dkey;
+		fr.dev_mac = length(mac) ? mac : null; fr.dev_ip = ip;
+		fr.dev_local = dev_local;
+		fr.a = null; fr.d = null; fr.c = null;
+		return;
+	}
 	fr.app_key = key;
 	fr.app_name = label ?? "Unknown";
 	fr.cat_key = cat;
@@ -767,8 +820,7 @@ function flow_new(digest, ev, f, now, late) {
 		a: null, d: null, c: null,
 		up: 0, down: 0, total: 0,
 		start: num(f.first_seen_at, now), seen: now,
-		shadow: false, late: (late == true),
-		pkey: null
+		shadow: false, late: (late == true)
 	};
 	flows[digest] = fr;
 	nflows++;
@@ -776,35 +828,8 @@ function flow_new(digest, ev, f, now, late) {
 	if (late)
 		stats.flows_late++;
 
-	// Dual-capture dedup (§3.2, heuristic — pending empirical validation with a
-	// NAT'd client).  Internal and external captures of the same client flow
-	// share the remote endpoint, so that is the join key.  When both exist the
-	// external NAT'd copy is shadowed: tracked, never counted.
-	if (length(f.other_ip ?? "")) {
-		let pk = peer_key(f);
-		fr.pkey = pk;
-		let p = peers[pk];
-		if (!p) {
-			p = {};
-			peers[pk] = p;
-		}
-		if (fr.internal) {
-			p.i = digest;
-			let twin = p.e ? flows[p.e] : null;
-			if (twin && !twin.shadow) {
-				flow_detach(twin);
-				twin.shadow = true;
-				stats.shadowed++;
-			}
-		} else {
-			p.e = digest;
-			if (fr.nat && p.i && flows[p.i]) {
-				fr.shadow = true;
-				stats.shadowed++;
-			}
-		}
-	}
-
+	// Attribution and single-count shadowing are both decided in flow_identify,
+	// deterministically from this flow alone (no cross-flow pairing state).
 	flow_identify(fr, ev, f, now);
 	return fr;
 }
@@ -861,33 +886,33 @@ function ev_flow(ev, f, now) {
 	flow_identify(fr, ev, f, now);
 }
 
-// flow_stats: digest + counters only.  local_bytes/other_bytes are *per-update
-// deltas* (verified on 4.4.7: they return to zero in the final flow_purge while
-// total_bytes, which is cumulative, does not), so they are accounted directly.
-// total_bytes is used only to bound a delta and to report the flow's lifetime
-// volume.
-function ev_flow_stats(ev, f, now) {
-	let fr = flows[f.digest];
-	if (!fr) {
-		// A flow that predates our connection (or netifyd without
-		// dump_established_flows).  Track it as Unknown so its bytes are not
-		// silently lost; identity follows if a flow event arrives later.
-		fr = flow_new(f.digest, ev, f, now, true);
-		if (!fr)
-			return;
-	}
-
+// local_bytes/other_bytes are *per-update deltas* (verified on 4.4.7: they
+// return to zero in the final flow_purge while total_bytes, cumulative, does
+// not).  This shared helper accounts one such update, bounding the directional
+// deltas by the growth of total_bytes so a self-inconsistent counter can never
+// inflate the totals.  Both flow_stats and flow_purge go through it, so the
+// clamp guarantee in DESIGN §2.2 holds on every accounting path — including the
+// purge path, whose payload shape is the one the interface doc could not
+// capture live.
+function flow_update(fr, f, now) {
 	let dl = num(f.local_bytes, 0), do_ = num(f.other_bytes, 0);
 	let tb = num(f.total_bytes, 0);
-	let dt = tb - fr.total;
-	if (dt < 0)
-		dt = tb;                     // netifyd counter reset
-	if (fr.total > 0 && (dl + do_) > dt) {
-		// Directional deltas can never exceed the growth of the cumulative
-		// counter; clamp proportionally if netifyd ever disagrees with itself.
-		let sum = dl + do_;
-		dl = int(dl * dt / sum);
-		do_ = dt - dl;
+
+	// Bound the deltas by total_bytes growth ONLY when total_bytes is usable
+	// (present and moving forward).  A missing or reset counter must not scale
+	// the real directional deltas to zero (that would silently and permanently
+	// stop accounting a flow); in that case trust the deltas as given.
+	if (tb > 0 && fr.total > 0) {
+		let dt = tb - fr.total;
+		if (dt < 0)
+			dt = tb;             // netifyd counter reset: treat tb as the delta
+		if ((dl + do_) > dt) {
+			let sum = dl + do_;
+			dl = (sum > 0) ? int(dl * dt / sum) : 0;
+			do_ = dt - dl;
+		}
+	} else if (tb <= 0) {
+		stats.no_total++;
 	}
 	if (tb > 0)
 		fr.total = tb;
@@ -895,18 +920,28 @@ function ev_flow_stats(ev, f, now) {
 	account(fr, dl, do_, now);
 }
 
+function ev_flow_stats(ev, f, now) {
+	let fr = flows[f.digest];
+	if (!fr) {
+		// A flow that predates our connection (netifyd 4.4.7 has no established-
+		// flow dump).  Track it as Unknown so its bytes are not silently lost;
+		// identity follows if a flow event arrives later.
+		fr = flow_new(f.digest, ev, f, now, true);
+		if (!fr)
+			return;
+	}
+	flow_update(fr, f, now);
+}
+
 function ev_purge(ev, f, now) {
 	let fr = flows[f.digest];
 	stats.purges++;
 	if (!fr)
 		return;
-	// The purge event carries the flow's final counters: account them before
-	// the record goes away.
-	account(fr, num(f.local_bytes, 0), num(f.other_bytes, 0), now);
-	let tb = num(f.total_bytes, 0);
-	if (tb > fr.total)
-		fr.total = tb;
+	// The purge carries the flow's final counter delta: account it, clamped like
+	// any other update, before the record goes away.
 	fr.reason = ev.reason ?? "purged";
+	flow_update(fr, f, now);
 	flow_drop(f.digest);
 }
 
@@ -1093,9 +1128,13 @@ connect = function() {
 	}
 
 	sock_fd = uloop.handle(sock, on_readable, uloop.ULOOP_READ);
+	// Count reconnects, not the first connect, so `socket.reconnects` reads as
+	// churn that actually happened.
+	if (ever_connected)
+		stats.reconnects++;
+	ever_connected = true;
 	connected = true;
 	backoff_ms = RECONNECT_MIN_MS;
-	stats.reconnects++;
 	router_bootstrap();
 	logmsg("info", "connected to %s", cfg.socket_path);
 };
@@ -1152,14 +1191,19 @@ function housekeeping() {
 
 	prune(now, false);
 
-	// Advance the trailing-hour rings: clears slots that have fallen out of
-	// the window so nothing stale can be reported or retained.
+	// Advance the trailing-hour rings and roll the rate windows.  Rolling here
+	// (not only in agg_bump) means an aggregate that has gone idle still sees
+	// its rate decay to zero, and it keeps agg_rate a pure read.
+	agg_roll(totals, now);
 	ring_sweep(totals.buckets, slot, SERIES_SLOTS);
 	for (let tbl in [ apps, devs, cats ])
 		for (let k in tbl) {
+			agg_roll(tbl[k], now);
 			ring_sweep(tbl[k].buckets, slot, SERIES_SLOTS);
 			for (let dk in tbl[k].devs ?? {})
 				ring_sweep(tbl[k].devs[dk].ring, dslot, DEVSER_SLOTS);
+			for (let hk in tbl[k].hosts ?? {})
+				ring_sweep(tbl[k].hosts[hk].ring, dslot, DEVSER_SLOTS);
 		}
 
 	// §7.3 seam: v1 has no persistent buckets, so this hands over nothing.
@@ -1334,14 +1378,16 @@ function m_app_detail(req) {
 	r.devices = ds;
 
 	let hs = [];
-	for (let h in a.hosts ?? {})
+	for (let h in a.hosts ?? {}) {
+		let ht = ring_total(a.hosts[h].ring, dslot, DEVSER_SLOTS);
 		push(hs, {
 			host: h,
-			download: a.hosts[h].down,
-			upload: a.hosts[h].up,
-			total: a.hosts[h].down + a.hosts[h].up,
+			download: ht[0],
+			upload: ht[1],
+			total: ht[0] + ht[1],
 			last_seen: a.hosts[h].last
 		});
+	}
 	sort(hs, (x, y) => (y.total - x.total));
 	r.hosts = hs;
 
@@ -1375,7 +1421,11 @@ function m_flows(req) {
 			ip_protocol: fr.proto,
 			upload: fr.up,
 			download: fr.down,
-			bytes_total: fr.total,
+			// netifyd's cumulative lifetime counter for the flow, NOT the sum of
+			// what appflow attributed (up+down): a stub flow adopted mid-life has
+			// a large lifetime but small attributed bytes.  Named distinctly so a
+			// consumer never confuses it with the aggregate `bytes_total`.
+			lifetime_bytes: fr.total,
 			first_seen: fr.start,
 			last_seen: fr.seen
 		});
@@ -1457,7 +1507,8 @@ function m_status(req) {
 	             top_n: cfg.top_n, idle_timeout: cfg.idle_timeout };
 	r.flows = { tracked: nflows, seen: stats.flows_seen, late: stats.flows_late,
 	            pruned: stats.flows_pruned, dropped: stats.flows_dropped,
-	            shadowed: stats.shadowed, purged: stats.purges };
+	            shadowed: stats.shadowed, purged: stats.purges,
+	            no_total: stats.no_total };
 	r.aggregates = { apps: length(apps), devices: length(devs),
 	                 categories: length(cats), pruned: stats.aggs_pruned };
 	r.events = { total: stats.events, frames: stats.frames, malformed: stats.malformed,
@@ -1484,6 +1535,11 @@ function m_reset(req) {
 			delete tbl[k].devs;
 			delete tbl[k].hosts;
 		}
+	// Zero each flow's attributed counters, but NOT flows[].total: that mirrors
+	// netifyd's cumulative lifetime counter and is the baseline the next
+	// flow_stats delta is measured against. Clearing it would make the next
+	// update compute a false multi-KB spike. flows[].lifetime_bytes therefore
+	// survives a reset by design.
 	for (let d in flows) {
 		flows[d].up = 0;
 		flows[d].down = 0;

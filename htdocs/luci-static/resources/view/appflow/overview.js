@@ -138,9 +138,9 @@ return view.extend({
 			]) : null
 		]));
 
-		dom.content(this.nodes.window, summary.window
+		dom.content(this.nodes.window, [ summary.window
 			? _('%d s rate window').format(appflow.num(summary, [ 'window' ]))
-			: '');
+			: '' ]);
 
 		this.paintThroughput(totals, rates);
 		this.paintApps(summary);

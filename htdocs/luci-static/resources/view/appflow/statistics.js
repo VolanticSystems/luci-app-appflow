@@ -266,9 +266,9 @@ return view.extend({
 			return self.sortDir * ((a[k] - b[k]) || (a.total - b.total));
 		});
 
-		dom.content(this.nodes.count, this.filter.length
+		dom.content(this.nodes.count, [ this.filter.length
 			? _('%d of %d applications').format(apps.length, total)
-			: _('%d applications').format(total));
+			: _('%d applications').format(total) ]);
 
 		var truncated = apps.length > MAX_ROWS;
 
@@ -338,7 +338,10 @@ return view.extend({
 		if (ev)
 			ev.stopPropagation();
 
-		ui.showModal(app.label, [
+		// Title must be a node array, never a bare string: LuCI's showModal
+		// routes a bare-string title through innerHTML, and app.label aliases
+		// to attacker-influenced fields (DHCP hostname, TLS SNI) one edit away.
+		ui.showModal([ app.label ], [
 			E('p', { 'class': 'spinning' }, [ _('Collecting data…') ])
 		], 'cbi-modal');
 
@@ -475,7 +478,7 @@ return view.extend({
 	handleClear: function() {
 		ui.showModal(_('Clear statistics'), [
 			E('p', {}, [
-				_('This zeroes every AppFlow counter and time bucket on the router. Collection carries straight on; the figures on this page simply start again from zero.')
+				_('This resets the per-application, per-device and per-category counters and time buckets. Live flow tracking continues uninterrupted, so the figures on this page simply start again from zero.')
 			]),
 			E('div', { 'class': 'af-btnrow' }, [
 				E('button', {
