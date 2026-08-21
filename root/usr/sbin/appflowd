@@ -615,6 +615,8 @@ function device_name(key, mac, ip, now) {
 		return "Router";
 	if (key == "unknown")
 		return "Unknown";
+	if (key == "multicast")
+		return "Multicast / Broadcast";
 	load_leases(now);
 	return leases.by_mac[mac ?? ""] ?? leases.by_ip[ip ?? ""] ?? (mac ?? ip ?? key);
 }
@@ -1288,10 +1290,13 @@ function app_row(a, now) {
 
 function dev_row(a, now) {
 	let e = metrics(a, now);
+	let pseudo = (a.key == "router" || a.key == "multicast" || a.key == "unknown");
 	e.key = a.key;
-	e.name = (a.key == "router") ? "Router" : device_name(a.key, a.mac, a.ip, now);
-	e.mac = a.mac;
-	e.ip = a.ip;
+	e.name = device_name(a.key, a.mac, a.ip, now);
+	// The pseudo-devices collapse many endpoints; a single leftover MAC/IP
+	// under them would be misleading, so present them without one.
+	e.mac = pseudo ? null : a.mac;
+	e.ip = pseudo ? null : a.ip;
 	e.is_router = (a.router == true);
 	return e;
 }
