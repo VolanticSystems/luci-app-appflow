@@ -248,8 +248,9 @@ Depends: `netifyd`, `luci-base`, `luci-lib-chartjs`, `rpcd-mod-ucode` (opt. B),
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ucode `publish()` reliability → decides §3 option A/B.
 - Dual-capture dedup heuristic needs empirical validation (§3.2).
-- EA8500 is a 2-core 1.4 GHz box; DPI + daemon CPU under load to be measured
-  before recommending on modest hardware.
+- EA8500 resource baseline MEASURED (2026-08-21, light load, 12 flows,
+  synthetic traffic): netifyd ~16.5 MB VSZ, ~0% CPU, box 95% idle, 397 MB
+  free. Heavy-load measurement (real client routed through) still pending.
 
 ## 9. Roadmap (queued, post-v1)
 
