@@ -151,16 +151,45 @@ tiny (no C, no external deps beyond packaged ucode modules).
 
 netifyd watches `br-lan` (internal) and `wan` (external) simultaneously, so a
 NAT'd client flow can be captured **twice** (pre- and post-NAT, different
-digests). Policy:
+digests, one per interface). The device a flow belongs to and whether it is a
+duplicate must be decided without double-counting.
 
-- Attribute flows to the **local device** = `local_mac`/`local_ip` on
-  `internal:true` captures; these carry true client identity.
-- `internal:false` flows whose `local_ip` is the router itself = router-origin
-  traffic, attributed to the device "Router".
-- `internal:false` flows with `ip_nat:true` that mirror an internal flow are
-  candidates for dedup; v1 heuristic: prefer internal capture, count external
-  NAT'd flows only when no internal twin exists. ⏳ validate empirically with a
-  real client routed through the box (planned: spare laptop).
+**The shipping rule (implemented in `flow_identify`).** An earlier design paired
+the two captures on the remote endpoint and keyed the dedup on `ip_nat`; it was
+replaced before v1 because that pairing was fragile (see §10). The rule that
+ships is deterministic and needs no cross-flow pairing state:
+
+- **Device side.** On an `internal` capture the device is the non-router
+  endpoint; on an `external` capture the device is the router-owned endpoint
+  (upstream infrastructure is the peer). `is_router()` decides which side is the
+  router, from the interface MAC/IP maps learned from `agent_status`.
+- **Multicast/broadcast** endpoints collapse to a single `multicast`
+  pseudo-device (via netifyd's `other_type` when present, else the group-bit MAC
+  test), so they cannot mint device aggregates.
+- **Single-count (shadow) rule.** An `internal` capture is always counted (it is
+  the device's own copy). An `external` capture is counted only when the device
+  is the router itself; an external capture of a *client* flow is a NAT twin and
+  is **shadowed** (tracked, never counted). This is gated on `saw_internal`, a
+  process-wide latch meaning "internal capture is active at all": on an
+  external-only netifyd (`-E` with no `-I`) nothing is shadowed, so every flow is
+  counted rather than dropped to zero.
+
+**What this rule is and is not.** It is a *mode* test ("is internal capture
+running"), not a *per-flow twin* test ("does this specific flow have an internal
+twin"). The two differ only for flows that appear on the WAN side alone, and
+`fr.nat` (`ip_nat`) is retained as a diagnostic field in the `flows` method but
+drives no decision.
+
+**Open, and honestly unvalidated (the §8 bench test).** This sandbox never NATs
+a client through its WAN, so the rule is confirmed only for the one case
+observed (router-origin + LAN-client on the default `-I br-lan -E wan`). The
+single fact that decides the NAT case is **what netifyd 4.4.7 puts in
+`local_mac`/`other_mac` when `ip_nat` is true**: if those still carry the
+router's WAN MAC, `dev_is_router` is true on the twin and it is correctly
+shadowed; if netifyd substitutes the client identity, `dev_is_router` is false
+and the twin would be dropped instead. Resolve by routing one real client
+through the box and comparing the Overview total against the interface byte
+counters, before changing the rule. ⏳
 
 ### 3.3 Memory bounds (runs on 128 MB devices)
 

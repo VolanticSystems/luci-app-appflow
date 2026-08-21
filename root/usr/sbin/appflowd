@@ -34,6 +34,8 @@ const RX_DRAIN_MAX = 64;         // recv() calls per readable event (fairness)
 const AGG_MAX = 384;             // max aggregates per class (apps/devices/cats)
 const APP_DEV_MAX = 64;          // devices tracked per application (LRU)
 const APP_HOST_MAX = 16;         // hostnames tracked per application (LRU)
+const NAME_MAX = 8192;           // id->tag map ceiling (nDPI catalogue is ~2.5k)
+const TAG_MAX = 64;              // max stored length of any detection tag
 const UNKNOWN_TYPE_MAX = 16;     // distinct unhandled event types remembered
 const EVENT_TYPE_MAX = 24;       // distinct event types counted in status
 const FLOWS_REPLY_MAX = 200;     // hard ceiling for the flows[] ubus reply
@@ -715,15 +717,19 @@ function flow_identify(fr, ev, f, now) {
 	let app_id = num(f.detected_application, 0);
 	let proto_id = num(f.detected_protocol, 0);
 
+	// Cap any tag taken straight off the wire (detected_*_name) so a single
+	// flow record cannot hold an unbounded string.
+	let cap = (s) => (length(s ?? "") > TAG_MAX) ? substr(s, 0, TAG_MAX) : s;
+
 	let key, label;
 	if (app_id > 0) {
 		key = "a" + app_id;
-		label = display_name(f.detected_application_name ?? names.app[app_id]);
-		fr.tag = f.detected_application_name ?? names.app[app_id];
+		fr.tag = cap(f.detected_application_name ?? names.app[app_id]);
+		label = display_name(fr.tag);
 	} else if (proto_id > 0) {
 		key = "p" + proto_id;
-		label = display_name(f.detected_protocol_name ?? names.proto[proto_id]);
-		fr.tag = f.detected_protocol_name ?? names.proto[proto_id];
+		fr.tag = cap(f.detected_protocol_name ?? names.proto[proto_id]);
+		label = display_name(fr.tag);
 	} else {
 		key = "unknown";
 		label = "Unknown";
@@ -752,21 +758,36 @@ function flow_identify(fr, ev, f, now) {
 	let dev_is_router = dev_local ? rl : ro;
 	let mac = dev_local ? lm : om;
 	let ip = dev_local ? f.local_ip : f.other_ip;
-	let group = is_group_mac(mac) || is_group_mac(dev_local ? om : lm);
+	// Honour netifyd's other_type when it names a group endpoint.  netifyd's
+	// enum documents "broadcast"/"multicast", though only "local"/"remote" were
+	// seen on this bench, so the group-bit MAC test below is the path that
+	// actually fires today; the other_type check is a forward-compatible
+	// preference that costs nothing and needs no re-verification to be safe (it
+	// only ever adds a positive on a documented value).
+	let ot = f.other_type;
+	let group = (ot == "multicast" || ot == "broadcast") ||
+	            is_group_mac(mac) || is_group_mac(dev_local ? om : lm);
 	let dkey = group ? "multicast"
 	                 : (dev_is_router ? "router" : (length(mac) ? mac : (ip ?? "unknown")));
 
-	// Single-count each flow (§3.2).  With netifyd watching the LAN bridge
-	// (internal) and WAN (external) at once, a client's traffic is captured
-	// twice.  Rather than pair the two captures by a fragile remote-endpoint
-	// key, count deterministically: an internal capture is always the device's
-	// own copy, while an external capture is counted only when the device is
-	// the router itself (router-originated traffic never crosses the bridge).
-	// An external capture of a client flow is therefore its NAT twin and is
-	// shadowed.  Order-independent, and correct for OpenWrt's default autoconfig
-	// (internal=br-lan, external=wan); documented as such in DESIGN §3.2.
-	// Guarded by saw_internal so an external-only netifyd (no -I) counts every
-	// flow instead of shadowing all client traffic to zero.
+	// Single-count each flow.  The SHIPPING rule is documented in DESIGN §3.2
+	// (which this implements; the earlier ip_nat-pairing design was replaced):
+	// with netifyd watching the LAN bridge (internal) and WAN (external) at once,
+	// a client's traffic is captured twice.  Rather than pair the two captures by
+	// a fragile remote-endpoint key, count deterministically -- an internal
+	// capture is always the device's own copy, while an external capture is
+	// counted only when the device is the router itself (router-originated
+	// traffic never crosses the bridge); an external client-flow capture is
+	// therefore a NAT twin and is shadowed.
+	//
+	// NOT order-independent in the strict sense: saw_internal is a process-wide
+	// capability latch ("is any internal capture running"), not per-flow evidence
+	// of a specific twin.  A WAN-side client flow seen BEFORE the first internal
+	// event is counted; the same flow seen after is shadowed.  This is the
+	// intended mode test, correct for OpenWrt's default autoconfig
+	// (internal=br-lan, external=wan); the per-flow twin question, and the exact
+	// contents of local_mac/other_mac when ip_nat is set, remain the open
+	// bench-test item in DESIGN §3.2 / §8.
 	if (fr.internal)
 		saw_internal = true;
 	let want_shadow = (saw_internal && !fr.internal && !dev_is_router && !group);
@@ -863,16 +884,26 @@ function ev_hello(ev) {
 	       agent.version ?? "?", ev.build_version ?? "");
 }
 
+// In normal operation `names` is bounded by nDPI's catalogue (a few thousand
+// ids from the definitions event).  These caps make that bound explicit rather
+// than incidental, so a buggy or hostile agent cannot grow the maps without
+// limit: entries beyond NAME_MAX are dropped and every stored tag is truncated.
+function store_name(tbl, id, tag) {
+	if (tbl[id] == null && length(tbl) >= NAME_MAX)
+		return;
+	tbl[id] = (length(tag ?? "") > TAG_MAX) ? substr(tag, 0, TAG_MAX) : tag;
+}
+
 function ev_definitions(ev) {
 	let na = 0, np = 0;
 	for (let e in ev.applications ?? []) {
 		if (e?.id == null) continue;
-		names.app[e.id] = e.tag;
+		store_name(names.app, e.id, e.tag);
 		na++;
 	}
 	for (let e in ev.protocols ?? []) {
 		if (e?.id == null) continue;
-		names.proto[e.id] = e.tag;
+		store_name(names.proto, e.id, e.tag);
 		np++;
 	}
 	logmsg("info", "definitions: %d applications, %d protocols", na, np);
