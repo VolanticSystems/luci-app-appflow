@@ -13,8 +13,8 @@ LUCI_TITLE:=Per-application traffic dashboard (DPI via Netify Agent)
 LUCI_DESCRIPTION:=Real-time per-application and per-device traffic visibility \
 	for OpenWrt, powered by the Netify Agent (netifyd) deep packet inspection \
 	engine. A LuCI-native functional equivalent of vendor DPI dashboards.
-LUCI_DEPENDS:=+netifyd +luci-base +luci-lib-chartjs +rpcd-mod-ucode \
-	+ucode-mod-socket +ucode-mod-uloop
+LUCI_DEPENDS:=+netifyd +luci-base +luci-lib-chartjs \
+	+ucode-mod-socket +ucode-mod-uloop +ucode-mod-ubus +ucode-mod-uci
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
