@@ -63,8 +63,11 @@ arch `arm_cortex-a15_neon-vfpv4`. All facts below observed live, not assumed.
     "last_seen_at": 1787325070685 } }
 ```
 
-Counters are **cumulative per flow** → rates are computed by the consumer as
-`Δtotal_bytes / Δt` between updates.
+**Correction (implementation ground truth, 2026-08-21):** `local_bytes` /
+`other_bytes` are **per-update deltas** (verified: they return to zero in the
+final `flow_purge` while `total_bytes` does not); only `total_bytes` is
+cumulative. appflowd accounts the directional deltas directly, clamped
+proportionally so they never exceed the growth of `total_bytes`.
 
 ### 2.3 Naming and taxonomy
 
@@ -87,10 +90,10 @@ Counters are **cumulative per flow** → rates are computed by the consumer as
 
 - `flow_purge` events carry final counters plus `reason: closed|expired|
   terminated`; the final delta must be accounted before flow removal.
-- netifyd 4.4.7 supports `dump_established_flows = yes` — on (re)connect a
-  client receives existing flows instead of starting blind. appflow ships an
-  idempotent uci-defaults script enabling it; the daemon additionally
-  tolerates `flow_stats` for unknown digests (stub entry, backfilled on the
+- **Corrected:** `dump_established_flows` does NOT exist in netifyd 4.4.7 (string absent from the binary; a research citation of v5-era docs was wrong). On (re)connect a
+  client starts blind. appflow ships a forward-compatible uci-defaults script (harmless no-op today) and
+  the daemon
+  tolerates `flow_stats` for unknown digests (stub "Unknown" entry, backfilled on the
   next `flow` event).
 - App detections are `netify.<slug>` strings; protocol names are plain.
 - OpenWrt ships netifyd **4.4.7** while upstream is v5.x with a different
@@ -124,8 +127,8 @@ Two implementation options for the ubus surface:
 - **B (fallback): snapshot file** — appflowd atomically writes
   `/var/run/appflow/state.json`; a stateless rpcd-ucode plugin serves reads.
 
-Decision rule: A if `publish()` proves reliable on 25.12 during build week;
-otherwise B. Both keep the same external contract (§5), so the UI is agnostic.
+**DECIDED: Option A shipped** — `publish()` proven reliable on 25.12 (typed args,
+status returns, int64 all verified on-device). Option B text retained above only as design rationale.
 
 ### 3.1 Why a persistent daemon (not an on-demand reader)
 
