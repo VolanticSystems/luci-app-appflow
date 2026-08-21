@@ -205,7 +205,7 @@ Depends: `netifyd`, `luci-base`, `luci-lib-chartjs`, `rpcd-mod-ucode` (opt. B),
 
 - ⏳ GL reference spec (agent) — locks §4.
 - ⏳ netifyd conf details (agent): socket keepalive, multi-client behavior,
-  `flow_stats` cadence config, purge event name/shape (not yet observed).
+  `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ucode `publish()` reliability → decides §3 option A/B.
 - Dual-capture dedup heuristic needs empirical validation (§3.2).
 - EA8500 is a 2-core 1.4 GHz box; DPI + daemon CPU under load to be measured
