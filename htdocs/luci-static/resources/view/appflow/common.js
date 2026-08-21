@@ -56,7 +56,7 @@ var STYLE_ID = 'appflow-style';
  *   iconMap === {}     pack absent or unreadable, do not ask again
  */
 var ICON_BASE = L.resource('appflow-icons'),
-    ICON_FILE = /^[A-Za-z0-9._-]+.svg$/,
+    ICON_FILE = /^[A-Za-z0-9._-]+\.svg$/,
     iconMap = null,
     iconProbe = null;
 

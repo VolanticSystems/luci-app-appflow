@@ -75,9 +75,9 @@ return view.extend({
 			], E('div', {}, [ n.kpi, n.chart ])),
 			E('div', { 'class': 'af-grid af-split' }, [
 				appflow.card(_('Top applications'), [ _('by current rate') ], n.apps),
-				appflow.card(_('Categories'), [ _('session total') ], n.cats)
+				appflow.card(_('Categories'), [ _('top, by cumulative bytes') ], n.cats)
 			]),
-			appflow.card(_('Top devices'), [ _('session total') ], n.devs)
+			appflow.card(_('Top devices'), [ _('top, by cumulative bytes') ], n.devs)
 		]);
 
 		this.downNode = E('div', { 'style': 'display:none' }, [ appflow.notRunning() ]);
