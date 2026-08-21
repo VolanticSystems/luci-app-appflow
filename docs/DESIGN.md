@@ -72,8 +72,10 @@ proportionally so they never exceed the growth of `total_bytes`.
 ### 2.3 Naming and taxonomy
 
 - `definitions` event carries id→tag maps: 416 applications, 217 protocols.
-  Two id spaces: nDPI protocol ids (< 10000: `Spotify`, `ZOOM`, `WireGuard`)
-  and Netify app ids (≥ 10000: `netify.google-ads`).
+  Applications and protocols are SEPARATE id spaces that can collide numerically
+  (id 206 is both `WireGuard` the protocol and `netify.cloudflare` the app), and
+  legacy netify apps exist below 10000 (netflix=133) — the `netify.` tag prefix,
+  not the id range, is the discriminator. Details: docs/netifyd-4.4.7-interface.md.
 - Category **names** live in `/etc/netify.d/netify-categories.json`:
   `application_tag_index` (32 tags: `streaming-media`, `social-media`, `games`,
   `voip`, `cdn`, `advertiser`, `os-software-updates`, `malware`, …) and
