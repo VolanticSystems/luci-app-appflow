@@ -5,6 +5,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-appflow-icons
+PKG_VERSION:=1.0.0
+PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0 AND CC0-1.0
 PKG_LICENSE_FILES:=licenses/LICENSE.simple-icons licenses/LICENSE.dashboard-icons
 PKG_MAINTAINER:=Bob <git16@bob7.com>
