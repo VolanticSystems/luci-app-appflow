@@ -77,7 +77,7 @@ jobs:
 
       - name: Install ESLint
         working-directory: ${{ runner.temp }}
-        run: npm install --no-audit --no-fund --no-save eslint@9 @eslint/js@latest
+        run: npm install --no-audit --no-fund --no-save eslint@9 @eslint/js@9
 
       - name: Write LuCI-aware ESLint flat config
         # Written to $RUNNER_TEMP, not into the repo: this workflow may only
