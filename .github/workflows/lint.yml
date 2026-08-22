@@ -96,6 +96,25 @@ jobs:
             -C /usr/local/bin "shellcheck-${ver}/shellcheck"
           shellcheck --version
 
+      - name: Assert every shebang file is executable
+        # A script that ships without the executable bit installs cleanly and
+        # then fails at runtime. Found the hard way: the package's post-install
+        # could not run /etc/init.d/appflowd ("Permission denied"), so the
+        # service never started and the ubus object never appeared, on a
+        # package whose build was green. luci.mk copies root/ preserving source
+        # modes, so the mode recorded in git is the mode on the device.
+        run: |
+          set -eu
+          bad=0
+          for f in $(find root -type f); do
+            if [ "$(head -c2 "$f")" = "#!" ] && [ ! -x "$f" ]; then
+              echo "::error file=$f::has a shebang but is not executable"
+              bad=1
+            fi
+          done
+          [ "$bad" = 0 ] && echo "all shebang files are executable"
+          exit "$bad"
+
       - name: Run shellcheck
         run: |
           set -eu
