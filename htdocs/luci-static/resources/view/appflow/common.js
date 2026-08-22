@@ -10,7 +10,7 @@
  * DESIGN.md §5, a thin normalisation layer over the daemon payloads, byte/rate
  * formatting, the category colour scheme and the SVG chart primitives.
  *
- * The charts are hand-drawn SVG on purpose (see README-frontend.md): SVG reads
+ * The charts are hand-drawn SVG on purpose (see docs/frontend.md): SVG reads
  * the theme's CSS custom properties directly, so identical markup stays legible
  * on the light and dark bootstrap themes with no JS colour probing.
  */
