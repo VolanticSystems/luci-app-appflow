@@ -31,16 +31,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ensure shellcheck is available
-        run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+      - name: Install shellcheck (pinned)
+        # The runner image ships 0.9.0, which predates the `busybox` shell
+        # dialect (added in 0.10.0). busybox ash IS the runtime for these
+        # scripts, and it supports `local`, which POSIX sh does not; checking
+        # as plain `sh` produces SC3043 on every OpenWrt init script. Pin a
+        # release that understands the real dialect instead of suppressing
+        # the warning.
+        run: |
+          set -eu
+          ver=v0.11.0
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${ver}/shellcheck-${ver}.linux.x86_64.tar.xz" \
+            | sudo tar -xJf - --strip-components=1 -C /usr/local/bin "shellcheck-${ver}/shellcheck"
+          shellcheck --version
 
       - name: Run shellcheck
         run: |
           set -eu
-          shellcheck --version
-          # busybox ash is the actual runtime; shellcheck has no ash dialect,
-          # so "sh" (POSIX) is the closest available check. -S warning drops
-          # style/info nits so this gates on likely-real bashisms, not taste.
+          # busybox ash is the actual runtime and shellcheck >= 0.10 models it
+          # directly, so check against that dialect rather than POSIX sh.
+          # -S warning drops style/info nits so this gates on likely-real
+          # problems, not taste.
           # Collect only paths that actually exist: a package may ship an
           # init script, uci-defaults, both or neither, and an unmatched glob
           # would otherwise be passed to shellcheck as a literal filename.
@@ -53,7 +64,7 @@ jobs:
           echo "Checking:"; echo "$files"
           # word splitting is intended here
           # shellcheck disable=SC2086
-          shellcheck -s sh -S warning $files
+          shellcheck -s busybox -S warning $files
 
   json:
     name: JSON validity
