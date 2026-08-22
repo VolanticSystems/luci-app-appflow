@@ -41,9 +41,19 @@ jobs:
           # busybox ash is the actual runtime; shellcheck has no ash dialect,
           # so "sh" (POSIX) is the closest available check. -S warning drops
           # style/info nits so this gates on likely-real bashisms, not taste.
-          shellcheck -s sh -S warning \
-            root/etc/init.d/* \
-            root/etc/uci-defaults/*
+          # Collect only paths that actually exist: a package may ship an
+          # init script, uci-defaults, both or neither, and an unmatched glob
+          # would otherwise be passed to shellcheck as a literal filename.
+          files=$(find root/etc/init.d root/etc/uci-defaults \
+                    -type f 2>/dev/null || true)
+          if [ -z "$files" ]; then
+            echo "No shell scripts to check."
+            exit 0
+          fi
+          echo "Checking:"; echo "$files"
+          # word splitting is intended here
+          # shellcheck disable=SC2086
+          shellcheck -s sh -S warning $files
 
   json:
     name: JSON validity

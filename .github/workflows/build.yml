@@ -45,16 +45,34 @@ jobs:
           # against git when those dirs exist; harmless (and cheap) when they don't.
           fetch-depth: 0
 
+      - name: Stage this package inside a feed directory
+        # openwrt/gh-action-sdk mounts FEED_DIR at /feed and registers it with
+        # `src-link`, so FEED_DIR must be a FEED: a directory *containing*
+        # package subdirectories. This repo is a single package whose Makefile
+        # sits at the root (the same layout upstream openwrt/luci uses under
+        # applications/), so it has to be nested one level here. Without this
+        # the feed index comes up empty ("Ignoring feed 'action' - index
+        # missing") and make reports "No rule to make target
+        # package/luci-app-appflow/download".
+        run: |
+          set -eu
+          dest="${{ runner.temp }}/feed/luci-app-appflow"
+          mkdir -p "$dest"
+          rsync -a --exclude '.git' --exclude '.github' ./ "$dest/"
+          echo "staged feed contents:"
+          ls -la "${{ runner.temp }}/feed"
+
       - name: Build luci-app-appflow via OpenWrt SDK
         uses: openwrt/gh-action-sdk@v11
         env:
           # ARCH selects the openwrt/sdk container tag directly (Dockerfile:
           # FROM $CONTAINER:$ARCH) — must be "<arch>-<openwrt-version>".
           ARCH: ${{ matrix.arch }}-${{ matrix.owrt }}
-          # This repo IS the feed (LuCI-feed-style Makefile at repo root,
-          # `include $(TOPDIR)/feeds/luci/luci.mk`). Restricting to the one
-          # package name gives per-package download/check/compile steps
-          # instead of "build everything in the feed".
+          # The feed is the staged directory created in the previous step,
+          # NOT the repo root: see that step for why. Restricting PACKAGES to
+          # our own package names gives per-package download/check/compile
+          # steps instead of "build everything in the feed".
+          FEED_DIR: ${{ runner.temp }}/feed
           PACKAGES: luci-app-appflow luci-app-appflow-icons
           # Default is already 1; kept explicit since build.yml relies on it.
           BUILD_LOG: 1

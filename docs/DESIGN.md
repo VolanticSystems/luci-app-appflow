@@ -100,8 +100,7 @@ accounting `local_bytes`/`other_bytes` from the purge event itself.
   §2.2); the final up/down split must be recovered from the accumulated
   ratio, not read off the purge event, before flow removal.
 - **Corrected:** `dump_established_flows` does NOT exist in netifyd 4.4.7 (string absent from the binary; a research citation of v5-era docs was wrong). On (re)connect a
-  client starts blind. appflow ships a forward-compatible uci-defaults script (harmless no-op today) and
-  the daemon
+  client starts blind. The daemon
   tolerates `flow_stats` for unknown digests (stub "Unknown" entry). **Corrected
   2026-08-22:** that stub is backfilled only when a `flow` event actually follows,
   which happens for a genuine stats-before-flow race but NOT for a flow that was
@@ -370,8 +369,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
   established when the daemon or netifyd (re)starts have their remaining bytes
   attributed to Unknown, because netifyd 4.4.7 emits no `flow` event for them
   (§2.4, §2.5). Bounded to that window, self-healing, non-destructive. Cannot be
-  fixed without an established-flow dump upstream; the forward-compatible
-  uci-defaults script is already in place for when one exists. Documented in the
+  fixed without an established-flow dump upstream. Documented in the
   README rather than hidden.
 - **Late re-point stranding (OPEN, unquantified).** If netifyd first reports a
   flow unclassified (`app_id <= 0`) and only later re-points it via a detection

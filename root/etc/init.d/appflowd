@@ -1,4 +1,6 @@
 #!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034  # START/STOP/USE_PROCD/PROG are read by
+# /etc/rc.common, which sources this file; they are never referenced here.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 VolanticSystems
 

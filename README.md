@@ -92,8 +92,7 @@ the supporting measurements are in [docs/DESIGN.md](docs/DESIGN.md) §2.5 and §
   identity. Its remaining bytes accumulate under "Unknown" until the flow ends.
   This is confined to the window after a restart, resolves on its own as flows
   cycle, and never loses bytes; byte conservation through this path is
-  verified. There is no fix available without upstream support, and a
-  forward-compatible hook is already in place for when netifyd provides one.
+  verified. There is no fix available without upstream support.
 - **Late re-classification may leave early bytes under "Unknown."** If netifyd
   initially reports a flow as unclassified and identifies it only after several
   packets, bytes counted before that point are not retroactively moved, because
