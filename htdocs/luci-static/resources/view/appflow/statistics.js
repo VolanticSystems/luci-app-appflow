@@ -345,6 +345,12 @@ return view.extend({
 		if (ev)
 			ev.stopPropagation();
 
+		/* Mark which app this drawer is for. A late detail() result only renders
+		 * if it still matches; today the spinner overlay blocks a second row
+		 * click while one is in flight, but that is an accident of the overlay
+		 * being modal, so the guard should not depend on it. */
+		this.detailKey = app.key;
+
 		// Title must be a node array, never a bare string: LuCI's showModal
 		// routes a bare-string title through innerHTML, and app.label aliases
 		// to attacker-influenced fields (DHCP hostname, TLS SNI) one edit away.
@@ -362,6 +368,11 @@ return view.extend({
 	renderDetail: function(app, detail, err) {
 		/* the drawer may have been dismissed while the call was in flight */
 		if (!document.body.classList.contains('modal-overlay-active'))
+			return;
+
+		/* or replaced by a drawer for a different app: a late result for the
+		 * previously-open app must not overwrite the one now showing */
+		if (this.detailKey !== app.key)
 			return;
 
 		var d = detail || {},
