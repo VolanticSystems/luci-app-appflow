@@ -39,7 +39,13 @@ return view.extend({
 	stats: null,
 
 	fetch: function() {
-		return L.resolveDefault(appflow.rpc.stats(RANGE), null);
+		/* Keep the rejection (via this.lastErr) instead of L.resolveDefault-ing
+		 * it away, so showDown can tell a stopped daemon from an ACL denial. */
+		var self = this;
+		return appflow.rpc.stats(RANGE).then(
+			function(v) { self.lastErr = null; return v; },
+			function(e) { self.lastErr = e; return null; }
+		);
 	},
 
 	load: function() {
@@ -157,6 +163,7 @@ return view.extend({
 
 	showDown: function() {
 		this.stats = null;
+		dom.content(this.downNode, appflow.notRunning(appflow.classifyFail(this.lastErr), this.lastErr));
 		this.liveNode.style.display = 'none';
 		this.downNode.style.display = '';
 	},
