@@ -983,24 +983,40 @@ return baseclass.extend({
 
 	/* ------------------------------------------------------- empty states */
 
-	notRunning: function(reason) {
+	/* Classify an rpc.declare(reject:true) rejection. ubus status 6 is permission
+	 * denied, which means appflowd IS up and the LuCI session lacks the ACL, a
+	 * different problem with a different fix than a stopped daemon (status 4,
+	 * object not found). LuCI encodes the rejection differently across versions
+	 * (a bare number, an Error, or a status string), so probe all three. */
+	classifyFail: function(err) {
+		if (err === 6 || err === '6')
+			return 'denied';
+		var s = (err && typeof err === 'object') ? (err.message || '') : String(err == null ? '' : err);
+		return (/\b6\b/.test(s) || /permission|denied|access/i.test(s)) ? 'denied' : 'down';
+	},
+
+	notRunning: function(kind, detail) {
+		var denied = (kind === 'denied');
+
 		return E('div', { 'class': 'cbi-section af-card af-empty' }, [
 			this.svg('svg', { 'viewBox': '0 0 24 24', 'role': 'img' }, [
 				this.svg('path', {
 					'd': 'M12 2 1 21h22L12 2zm0 5 7.5 12.9h-15L12 7zm-1 4v5h2v-5h-2zm0 6v2h2v-2h-2z'
 				})
 			]),
-			E('h3', {}, [ _('appflowd is not running') ]),
-			E('p', {}, [
-				_('The AppFlow collector could not be reached over ubus, so there is no traffic data to show. Start the service and this page picks it up automatically.')
+			E('h3', {}, [ denied ? _('AppFlow: access denied') : _('appflowd is not running') ]),
+			E('p', {}, [ denied
+				? _('appflowd is running, but this LuCI session was refused access to it over ubus (permission denied). This is an ACL problem, not a stopped service: confirm the luci-app-appflow ACL is installed and reload rpcd.')
+				: _('The AppFlow collector could not be reached over ubus, so there is no traffic data to show. Start the service and this page picks it up automatically.')
 			]),
-			E('pre', { 'class': 'af-cmd' }, [
-				'/etc/init.d/appflowd enable\n/etc/init.d/appflowd start'
+			E('pre', { 'class': 'af-cmd' }, [ denied
+				? '/etc/init.d/rpcd restart'
+				: '/etc/init.d/appflowd enable\n/etc/init.d/appflowd start'
 			]),
-			E('p', { 'class': 'af-sub' }, [
+			denied ? '' : E('p', { 'class': 'af-sub' }, [
 				_('AppFlow also needs the Netify Agent running (%s), since that is where the per-application classification comes from.').format('/etc/init.d/netifyd status')
 			]),
-			reason ? E('p', { 'class': 'af-sub af-mono' }, [ String(reason) ]) : ''
+			detail ? E('p', { 'class': 'af-sub af-mono' }, [ String(detail) ]) : ''
 		]);
 	},
 

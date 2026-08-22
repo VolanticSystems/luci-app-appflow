@@ -35,12 +35,15 @@ return view.extend({
 	painted: false,
 
 	fetch: function() {
+		/* Capture the summary rejection (rather than L.resolveDefault-ing it to
+		 * null) so paint can tell a stopped daemon from an ACL denial. */
 		return Promise.all([
-			L.resolveDefault(appflow.rpc.summary(), null),
+			appflow.rpc.summary().then(function(v) { return { v: v }; },
+			                          function(e) { return { e: e }; }),
 			L.resolveDefault(appflow.rpc.devices(), null),
 			L.resolveDefault(appflow.rpc.status(), null)
 		]).then(function(r) {
-			return { summary: r[0], devices: r[1], status: r[2] };
+			return { summary: r[0].v || null, err: r[0].e, devices: r[1], status: r[2] };
 		});
 	},
 
@@ -110,7 +113,7 @@ return view.extend({
 			/* One miss on a live page is usually a blip; only fall back to the
 			 * "not running" screen once it is clearly not coming back. */
 			if (this.fails >= (this.painted ? 2 : 1))
-				return this.showDown();
+				return this.showDown(data ? data.err : null);
 
 			return;
 		}
@@ -148,8 +151,9 @@ return view.extend({
 		this.paintDevices(data.devices, summary);
 	},
 
-	showDown: function() {
+	showDown: function(err) {
 		this.samples = [];
+		dom.content(this.downNode, appflow.notRunning(appflow.classifyFail(err), err));
 		this.liveNode.style.display = 'none';
 		this.downNode.style.display = '';
 	},

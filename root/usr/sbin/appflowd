@@ -1227,6 +1227,12 @@ connect = function() {
 	ever_connected = true;
 	connected = true;
 	backoff_ms = RECONNECT_MIN_MS;
+	// A new socket is a new netifyd lifetime.  saw_internal is a capability
+	// latch about the CURRENT stream ("is internal capture active"), so it must
+	// not carry over: a netifyd restarted external-only would otherwise keep the
+	// stale `true` and shadow every client flow to zero.  Cleared here so the new
+	// stream re-establishes it from its own events.
+	saw_internal = false;
 	router_bootstrap();
 	logmsg("info", "connected to %s", cfg.socket_path);
 };
