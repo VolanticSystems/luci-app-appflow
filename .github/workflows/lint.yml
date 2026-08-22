@@ -102,7 +102,14 @@ jobs:
                   form: 'readonly', session: 'readonly', request: 'readonly',
                   validation: 'readonly', widgets: 'readonly', view: 'readonly',
                   window: 'readonly', document: 'readonly', console: 'readonly'
-                }
+                },
+                // LuCI's module loader wraps each view file, so a top-level
+                // `return L.view.extend(...)` is legal in this dialect even
+                // though it is not in a plain script. Upstream's own
+                // eslint.config.mjs sets exactly this option for the same
+                // reason; omitting it makes ESLint reject every view file
+                // with "'return' outside of function".
+                parserOptions: { ecmaFeatures: { globalReturn: true } }
               },
               rules: {
                 // LuCI's module loader injects the globals above at runtime;
