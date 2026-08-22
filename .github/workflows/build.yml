@@ -56,11 +56,19 @@ jobs:
         # package/luci-app-appflow/download".
         run: |
           set -eu
-          dest="${{ runner.temp }}/feed/luci-app-appflow"
-          mkdir -p "$dest"
-          rsync -a --exclude '.git' --exclude '.github' ./ "$dest/"
+          feed="${{ runner.temp }}/feed"
+          mkdir -p "$feed/luci-app-appflow"
+          # icons/ is a SEPARATE package: icons/Makefile declares
+          # luci-app-appflow-icons with its own PKG_NAME and licences. It must
+          # therefore be staged as a SIBLING package directory in the feed,
+          # not as a subdirectory of the main package, or the feed index will
+          # not contain it and make reports "No rule to make target
+          # package/luci-app-appflow-icons/download".
+          rsync -a --exclude '.git' --exclude '.github' --exclude 'icons' \
+            ./ "$feed/luci-app-appflow/"
+          rsync -a icons/ "$feed/luci-app-appflow-icons/"
           echo "staged feed contents:"
-          ls -la "${{ runner.temp }}/feed"
+          ls -la "$feed"
 
       - name: Build luci-app-appflow via OpenWrt SDK
         uses: openwrt/gh-action-sdk@v11
