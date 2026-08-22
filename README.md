@@ -64,6 +64,11 @@ Build:
         package/luci-app-appflow
     make package/luci-app-appflow/compile V=s
 
+The optional icon pack is a separate package in the same tree, so build it
+separately if you want it:
+
+    make package/luci-app-appflow-icons/compile V=s
+
 Install on the device (copy the built package over first):
 
     apk add --allow-untrusted /tmp/luci-app-appflow-*.apk
@@ -77,7 +82,7 @@ by an OpenWrt repository key. On releases still using opkg, use
 `luci-app-appflow-icons` adds brand icons for the applications netifyd can
 detect. Without it the dashboard renders letter-tile avatars, which is a
 supported configuration rather than a degraded one. It is packaged separately
-so the base package stays small:
+so the base package stays small. Build it as shown above, then:
 
     apk add --allow-untrusted /tmp/luci-app-appflow-icons-*.apk
 

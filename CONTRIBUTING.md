@@ -22,9 +22,16 @@ case you are looking at saves everyone time.
 
 ## Building
 
-This repository is itself a LuCI-style feed: the `Makefile` at the root
-includes `$(TOPDIR)/feeds/luci/luci.mk`, so it drops straight into an OpenWrt
-SDK tree.
+This repository is a single LuCI package, with its `Makefile` at the root and
+`icons/` as a second package beside it. That is the same layout upstream
+`openwrt/luci` uses under `applications/`, and it drops straight into an
+OpenWrt SDK tree's `package/` directory, which the build system scans
+recursively.
+
+It is **not** a feed. A feed is a directory *containing* package directories,
+and adding this repo directly with `src-link` produces an empty feed index.
+The CI workflow stages the packages into a temporary feed directory for
+exactly this reason; see `.github/workflows/build.yml`.
 
     # from an OpenWrt SDK tree matching your target release
     ./scripts/feeds update -a
@@ -32,6 +39,7 @@ SDK tree.
     git clone https://github.com/VolanticSystems/luci-app-appflow.git \
         package/luci-app-appflow
     make package/luci-app-appflow/compile V=s
+    make package/luci-app-appflow-icons/compile V=s
 
 CI builds both packages against the OpenWrt SDK on every push and pull
 request, so a build break shows up without anyone having to reproduce it
