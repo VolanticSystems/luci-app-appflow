@@ -39,11 +39,12 @@ jobs:
 
     steps:
       - name: Check out repository
+        # A shallow checkout is sufficient. The previous full-history fetch was
+        # justified by gh-action-sdk diffing against git, but the staging step
+        # below copies the tree with --exclude '.git', so the SDK never sees a
+        # git dir at all. Package versions come from PKG_VERSION/PKG_RELEASE in
+        # the Makefile, not from git history.
         uses: actions/checkout@v4
-        with:
-          # Full history: gh-action-sdk diffs patches/ and shfmt's files/*.init
-          # against git when those dirs exist; harmless (and cheap) when they don't.
-          fetch-depth: 0
 
       - name: Stage this package inside a feed directory
         # openwrt/gh-action-sdk mounts FEED_DIR at /feed and registers it with
@@ -64,7 +65,7 @@ jobs:
           # not as a subdirectory of the main package, or the feed index will
           # not contain it and make reports "No rule to make target
           # package/luci-app-appflow-icons/download".
-          rsync -a --exclude '.git' --exclude '.github' --exclude 'icons' \
+          rsync -a --exclude '.git' --exclude '.github' --exclude '/icons/' \
             ./ "$feed/luci-app-appflow/"
           rsync -a icons/ "$feed/luci-app-appflow-icons/"
           echo "staged feed contents:"
@@ -84,6 +85,26 @@ jobs:
           PACKAGES: luci-app-appflow luci-app-appflow-icons
           # Default is already 1; kept explicit since build.yml relies on it.
           BUILD_LOG: 1
+
+      - name: Verify the expected packages were produced
+        # `if-no-files-found: error` on the upload step fires only when the glob
+        # matches NOTHING, so a run that produced one of two packages, or only
+        # unrelated dependency packages, would still upload and go green.
+        # Assert each package this repo claims to ship, by name.
+        run: |
+          set -eu
+          rc=0
+          for pkg in luci-app-appflow luci-app-appflow-icons; do
+            found=$(find bin/packages -type f \
+                      \( -name "${pkg}-[0-9]*.apk" -o -name "${pkg}_[0-9]*.ipk" \) 2>/dev/null || true)
+            if [ -z "$found" ]; then
+              echo "::error::expected package '$pkg' was not built"
+              rc=1
+            else
+              echo "ok: $found"
+            fi
+          done
+          exit "$rc"
 
       - name: Upload built packages
         uses: actions/upload-artifact@v4
