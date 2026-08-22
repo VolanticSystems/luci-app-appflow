@@ -102,12 +102,53 @@ accounting `local_bytes`/`other_bytes` from the purge event itself.
 - **Corrected:** `dump_established_flows` does NOT exist in netifyd 4.4.7 (string absent from the binary; a research citation of v5-era docs was wrong). On (re)connect a
   client starts blind. appflow ships a forward-compatible uci-defaults script (harmless no-op today) and
   the daemon
-  tolerates `flow_stats` for unknown digests (stub "Unknown" entry, backfilled on the
-  next `flow` event).
+  tolerates `flow_stats` for unknown digests (stub "Unknown" entry). **Corrected
+  2026-08-22:** that stub is backfilled only when a `flow` event actually follows,
+  which happens for a genuine stats-before-flow race but NOT for a flow that was
+  already established at connect time — netifyd never emits a `flow` event for
+  those, so they stay Unknown for their remaining lifetime. Measured in §2.5.
 - App detections are `netify.<slug>` strings; protocol names are plain.
 - OpenWrt ships netifyd **4.4.7** while upstream is v5.x with a different
   plugin architecture — all behavior here is pinned to 4.4.7-as-packaged.
 - netifyd bundles its own nDPI statically: `libndpi` is NOT a dependency.
+
+### 2.5 Byte-attribution behaviour (measured 2026-08-22)
+
+Three questions about where bytes land were settled on the bench (EA8500,
+netifyd 4.4.7). **Method matters here:** all earlier attempts were confounded by
+upstream hosts throttling the test router's WAN IP under repeated fetches, and a
+refused connection carries no SNI, so netifyd cannot classify it and it lands as
+Unknown for reasons unrelated to this daemon. The measurements below therefore
+use **LAN-local traffic only** (a file served from the router over `br-lan` via
+`socat`, pulled by a LAN client with `curl --limit-rate`), so no upstream can
+participate and throttling is impossible by construction.
+
+- **Byte conservation through the Unknown path: HOLDS.** 25 short flows of 2 MB
+  = 50,000,000 bytes of client-side ground truth against 51,127,054 bytes
+  accounted (the excess is TCP/HTTP overhead, both directions). Repeated with
+  150 *tiny* 1 KB flows (the case most likely to complete inside one
+  `update_interval`, and so most likely to be purged before any `flow_stats`):
+  all 150 accounted, `no_total` = 0, nothing lost. A plausible reading of the
+  `fr.total > 0` gate in `flow_update()` predicts silent loss for such flows;
+  that prediction is **refuted** on this hardware, because netifyd supplies
+  accountable byte counts for sub-interval flows.
+- **Connect/reconnect blindness: REAL, bounded, not fixable here.** A flow that
+  is already established when the daemon connects gets `flow_stats` but never a
+  `flow` event (§2.4), so its identity never arrives and its ongoing bytes
+  accumulate under Unknown until it ends. Forced deterministically by restarting
+  the daemon mid-transfer: 10.7 MB of a correctly-classified HTTP flow moved to
+  Unknown while the app's own total stayed flat, and a fresh socket client
+  observed 5 `flow_stats` and 0 `flow` events for that flow. Confined to the
+  window after a daemon restart or a netifyd restart, self-heals as flows cycle,
+  and the bytes are parked rather than lost. No fix exists on our side without
+  an established-flow dump from netifyd; see §8.
+- **Late re-point stranding: OPEN, see §8.** Distinct from the above and not yet
+  observed in the wild.
+
+Counters relevant to all three (`status.flows`) behaved consistently: `dropped`
+stayed 0 and `late` stayed flat under sustained load, so the daemon is not
+losing events under load; the Unknown mass seen during earlier testing was the
+upstream confound plus the restart blindness above, not an event-handling defect.
 
 ## 3. Architecture
 
@@ -323,6 +364,27 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
 - EA8500 resource baseline MEASURED (2026-08-21, light load, 12 flows,
   synthetic traffic): netifyd ~16.5 MB VSZ, ~0% CPU, box 95% idle, 397 MB
   free. Heavy-load measurement (real client routed through) still pending.
+- ~~Byte conservation through the Unknown/late-stub path~~ — VERIFIED sound
+  2026-08-22 (§2.5), including the sub-`update_interval` case.
+- **Connect/reconnect blindness (KNOWN LIMITATION, will ship).** Flows already
+  established when the daemon or netifyd (re)starts have their remaining bytes
+  attributed to Unknown, because netifyd 4.4.7 emits no `flow` event for them
+  (§2.4, §2.5). Bounded to that window, self-healing, non-destructive. Cannot be
+  fixed without an established-flow dump upstream; the forward-compatible
+  uci-defaults script is already in place for when one exists. Documented in the
+  README rather than hidden.
+- **Late re-point stranding (OPEN, unquantified).** If netifyd first reports a
+  flow unclassified (`app_id <= 0`) and only later re-points it via a detection
+  update, bytes counted before the re-point stay under Unknown, because the
+  accounting seam is append-only by design (see the re-point comment in
+  `classify()`). No counter currently exposes this, so its real-world magnitude
+  is unknown. It could not be induced deliberately on the bench (it needs a
+  protocol netifyd classifies only after several packets on a stable
+  connection). Cheapest settling test: a real-traffic socket capture correlating
+  per-digest `flow`/`flow_stats`/detection-update ordering, excluding
+  connect-time orphans by `first_seen_at`; alternatively instrument the re-point
+  in `classify()` to accumulate stranded mass into a `status` counter. Deferred
+  rather than guessed at.
 
 ## 9. Roadmap (queued, post-v1)
 

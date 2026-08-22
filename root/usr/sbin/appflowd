@@ -1014,9 +1014,25 @@ function flow_update(fr, f, now) {
 function ev_flow_stats(ev, f, now) {
 	let fr = flows[f.digest];
 	if (!fr) {
-		// A flow that predates our connection (netifyd 4.4.7 has no established-
-		// flow dump).  Track it as Unknown so its bytes are not silently lost;
-		// identity follows if a flow event arrives later.
+		// Stats for a digest we hold no flow event for.  Two distinct causes
+		// with DIFFERENT outcomes; both characterised on hardware 2026-08-22
+		// (EA8500, netifyd 4.4.7, deconfounded LAN-local traffic):
+		//
+		//   1. A genuine stats-before-flow race on a NEW flow.  The flow event
+		//      lands shortly after and identity follows via flow_identify().
+		//
+		//   2. A flow already established when we connected or reconnected.
+		//      netifyd 4.4.7 has no established-flow dump, so it emits
+		//      flow_stats for such a flow but NEVER a flow event: identity
+		//      never arrives and the bytes stay under Unknown until the flow
+		//      ends.  Measured by restarting this daemon mid-transfer, which
+		//      stranded 10.7 MB of a correctly-classified HTTP flow (a fresh
+		//      socket client saw 5 flow_stats and 0 flow events for it).
+		//      Bounded to the connect/reconnect window, self-heals as flows
+		//      cycle, and not fixable here without netifyd support.
+		//
+		// Either way the bytes are PARKED as Unknown, never dropped: byte
+		// conservation through this path is verified (DESIGN 2.5, 8).
 		fr = flow_new(f.digest, ev, f, now, true);
 		if (!fr)
 			return;
