@@ -456,7 +456,13 @@ return baseclass.extend({
 		if (!whole)
 			return '0.0%';
 
-		return '%.1f%%'.format(100 * part / whole);
+		/* Clamp at 100: the app total and the per-device totals come from rings
+		 * of different bucket granularity over the same trailing hour, so at the
+		 * window edge a single device's total can round just above the app total.
+		 * A share over 100% reads as a bug even when the few-byte cause is benign. */
+		var pct = 100 * part / whole;
+
+		return '%.1f%%'.format(pct > 100 ? 100 : pct);
 	},
 
 	fmtAgo: function(stamp) {

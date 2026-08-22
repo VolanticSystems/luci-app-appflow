@@ -1457,7 +1457,18 @@ function m_app_detail(req) {
 	r.app = a.key;
 	r.tag = a.tag ?? a.key;
 	r.label = a.name;
+	// The detail drawer is opened from the Statistics table, which is a
+	// trailing-hour view.  Report the byte totals over that same window (from the
+	// hour ring) so the drawer header cannot disagree with the row that opened it;
+	// the earlier metrics(a) returned session-lifetime bytes, which read as a
+	// gross mismatch under an "last 60 minutes" caption.  Rate and flow context
+	// stay as-is (a rate is inherently current).
+	let at = ring_total(a.buckets, slot, SERIES_SLOTS);
 	r.metrics = metrics(a, now);
+	r.metrics.bytes_down = at[0];
+	r.metrics.bytes_up = at[1];
+	r.metrics.bytes_total = at[0] + at[1];
+	r.metrics.window = "hour";
 	r.time_series = ring_series(a.buckets, slot, SERIES_SLOTS, SERIES_MS);
 
 	let ds = [];
