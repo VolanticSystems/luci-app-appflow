@@ -67,10 +67,6 @@ left to be discovered. Details and supporting measurements are in
   identifies a flow only after several packets, bytes counted before that point
   are not retroactively moved, because the accounting path is deliberately
   append-only. Not observed in practice and currently unquantified.
-- **NAT dual-capture attribution is unvalidated on hardware.** The rule for
-  reconciling the two captures of a NAT'd flow is implemented and reasoned
-  through (DESIGN 3.2) but has not been exercised with a real client routed
-  through the device, which the development bench could not provide.
 - **Detection quality is netifyd's, not ours.** Which applications are
   recognised, and how accurately, is a property of the DPI engine and its
   signature data. appflow reports what netifyd detects.
