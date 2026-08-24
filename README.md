@@ -63,6 +63,15 @@ left to be discovered. Details and supporting measurements are in
   and loses no byte totals. A future version could mitigate the
   `appflowd`-restart case by checkpointing its own identity map; the case where
   *netifyd* restarts cannot be fixed without support from netifyd.
+- **Totals double-count traffic from clients behind NAT.** netifyd reports the
+  external capture of a NAT'd flow with the router's own MAC, and appflow does
+  not recognise it as the twin of the internal capture, so the same bytes are
+  counted once against the client and again against "Router". Measured at 163%
+  to 199% of actual traffic. **The per-device figure for a client is accurate**
+  (within 496 bytes in 53 MB); it is the grand total and the "Router" row that
+  overstate. If you route clients through this device, read per-device numbers
+  and treat the total as an upper bound. Details and the fix direction are in
+  DESIGN 3.2.
 - **Late re-classification may leave early bytes under "Unknown".** If netifyd
   identifies a flow only after several packets, bytes counted before that point
   are not retroactively moved, because the accounting path is deliberately

@@ -220,9 +220,15 @@ twin"). The two differ only for flows that appear on the WAN side alone, and
 `fr.nat` (`ip_nat`) is retained as a diagnostic field in the `flows` method but
 drives no decision.
 
-**RESOLVED on hardware, 2026-08-24.** The deciding fact was what netifyd 4.4.7
-puts in `local_mac`/`other_mac` when `ip_nat` is true. Measured: **it carries
-the router's own WAN identity, not the client's.** A NAT'd flow's external
+**CONFIRMED DEFECT, 2026-08-24. This double-counts.** An earlier revision of
+this section, committed the same day, claimed the opposite and said the twin
+was correctly shadowed. That claim rested on a single measurement and was
+wrong; the correction and how it happened are recorded at the end of this
+section, because the mistake is more instructive than the result.
+
+The deciding fact was what netifyd 4.4.7 puts in `local_mac`/`other_mac` when
+`ip_nat` is true. Measured: **it carries the router's own WAN identity, not the
+client's.** A NAT'd flow's external
 capture reports
 
 ```json
@@ -233,24 +239,65 @@ capture reports
 
 where `192.168.72.10` / `c0:56:27:4e:3e:92` are this router's WAN address and
 MAC, while the internal capture of the same flow carries the real client
-(`192.168.1.50`). So `dev_is_router` is true on the twin and the shadow rule
-suppresses it, which is the branch that was hoped for: the twin is **shadowed,
-not dropped**.
+(`192.168.1.50`).
 
-Verified end to end by giving the router a genuine NAT'd client of its own: a
-veth pair into a network namespace attached to `br-lan`, addressed
-`192.168.1.50/24` with a default route through the router, so its traffic is
-really forwarded and really NATed. Pulling 20,000,000 bytes through it:
+That makes `dev_is_router` **true** on the twin, and the rule reads
+
+```
+want_shadow = (saw_internal && !fr.internal && !dev_is_router && !group)
+```
+
+so `!dev_is_router` is false and the twin is **NOT shadowed**. It is counted a
+second time, under the `router` pseudo-device, on top of the internal capture
+already counted against the real client. The global total roughly doubles for
+NAT'd client traffic.
+
+Measured with a genuine NAT'd client: a veth pair into a network namespace
+attached to `br-lan`, addressed `192.168.1.50/24` with a default route through
+the router, so its traffic is really forwarded and really NATed. Ground truth
+is the veth interface byte counter, which is **wire** bytes, the same quantity
+appflow counts.
+
+Per-device attribution of the client itself is essentially exact. 25 flows of
+2 MB:
 
 | | bytes |
 |---|---|
-| ground truth delivered to the client (veth counter) | ~20.97 M |
-| appflow, attributed to the client device | 20,950,037 down |
-| appflow, attributed to the Router pseudo-device | 452 |
+| wire ground truth to/from the client | 53,145,843 |
+| appflow, client device | 53,145,347 |
 
-The client is credited essentially all of it, the router essentially none, and
-`status.flows` reported `shadowed` incrementing with `dropped: 0`. No
-double-count and no loss.
+496 bytes of difference in 53 MB. The client's own row is trustworthy.
+
+**The global total is not.** The same run credited the `router` pseudo-device a
+further 51,785,387 bytes, the external twin of the very same traffic. Three
+clean single-flow trials, each restarting `appflowd` first and letting the flow
+purge:
+
+| run | wire truth | appflow grand total | ratio |
+|---|---|---|---|
+| 1 | 10,479,105 | 17,089,074 | 163% |
+| 2 | 10,478,155 | 20,639,013 | 196% |
+| 3 | 10,478,879 | 20,877,799 | 199% |
+
+**Fix direction, not yet implemented.** The `!dev_is_router` term exists for a
+real reason: traffic the router genuinely originates belongs under `router` and
+must not be shadowed. So it cannot simply be dropped. What is needed is a way
+to tell a router-originated flow from a NAT'd client's twin, both of which
+present the router's own MAC on the external capture. `ip_nat` looks like the
+obvious discriminator and `fr.nat` already carries it, but it is **not
+reliable**: a capture taken while generating both kinds of traffic reported
+`ip_nat: false` for every flow including the NAT'd client's, even though
+`ip_nat: true` was definitely observed on a router-WAN flow earlier the same
+day. Any fix must first establish when netifyd actually sets that field.
+
+**How the wrong conclusion got committed, because this is the useful part.**
+The first measurement was a single 20 MB flow that reported the client at
+20,950,037 bytes and `router` at 452. That looked decisive and was written up
+as resolved. It was not reproducible: repeating the identical single-flow test
+gave `router` 20,572,398 and a grand total of 167%. One measurement, no
+repetition, and a result that happened to match the hoped-for branch. The same
+failure this project has caught in reviewers repeatedly, committed by the
+author, on the day it was caught elsewhere.
 
 **Methodology warning for anyone repeating this.** An earlier run of the same
 test reported 69% and then a spread of 46-101%, which would have been a serious
@@ -388,12 +435,15 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ~~ucode `publish()` reliability → decides §3 option A/B~~: resolved, §3
   states Option A shipped, proven reliable on 25.12.
-- ~~Dual-capture dedup heuristic needs empirical validation~~ — RESOLVED
-  2026-08-24 (§3.2). netifyd 4.4.7 reports the router's own WAN MAC on the
-  external capture of a NAT'd flow, so the twin is shadowed rather than
-  dropped. Verified with a real NAT'd client (netns + veth on `br-lan`):
-  20 MB pulled, client credited 20,950,037 bytes down, Router pseudo-device
-  452. No double-count, no loss.
+- **Dual-capture dedup DOUBLE-COUNTS NAT'd client traffic (CONFIRMED, §3.2).**
+  netifyd 4.4.7 reports the router's own WAN MAC on the external capture of a
+  NAT'd flow, so `dev_is_router` is true and `want_shadow` is false: the twin
+  is counted again under `router`. Measured 163%, 196% and 199% of wire ground
+  truth across three trials. The per-device row for the client is accurate to
+  496 bytes in 53 MB; it is the **grand total** and the `router` row that are
+  wrong. No fix yet: `!dev_is_router` protects genuinely router-originated
+  traffic and cannot simply be removed, and `ip_nat` is not a reliable
+  discriminator. See §3.2 for the fix direction.
 - EA8500 resource baseline MEASURED (2026-08-21, light load, 12 flows,
   synthetic traffic): netifyd ~16.5 MB VSZ, ~0% CPU, box 95% idle, 397 MB
   free. Heavy-load measurement (real client routed through) still pending.
