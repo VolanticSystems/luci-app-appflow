@@ -131,6 +131,26 @@ participate and throttling is impossible by construction.
   `fr.total > 0` gate in `flow_update()` predicts silent loss for such flows;
   that prediction is **refuted** on this hardware, because netifyd supplies
   accountable byte counts for sub-interval flows.
+
+  **Re-tested at the EVENT level 2026-08-24, after an adversarial review panel
+  independently reached the same prediction three times.** The 2026-08-22 result
+  above is outcome-based: it shows the bytes landed, not why. Tapping netifyd's
+  export socket directly for 170 s (`flow`/`flow_stats`/`flow_purge` per digest,
+  UDP DNS and short TCP both driven deliberately), **64 of 64 flows whose full
+  lifecycle was observed carried a `flow_stats` before their `flow_purge`.**
+  Zero went `flow` -> `flow_purge` directly. The premise the prediction rests on
+  does not occur on netifyd 4.4.7.
+
+  Two flows in that capture did show a purge with no preceding stats, and both
+  were flows that predated the tap: their birth was simply not observed. That is
+  §2.4 connect-blindness, not this. Mistaking one for the other is easy and is
+  why the analysis is stated at the level of *fully observed* lifecycles.
+
+  The gate is nonetheless now defended: `flow_update()` takes a `final` flag from
+  `ev_purge()` and attributes `total_bytes` if a purge-only flow ever does
+  arrive, counted in `stats.purge_only` and reported as
+  `status.bytes.purge_only_rescued`. Expected to stay 0 on this netifyd; a
+  non-zero value means the undocumented behaviour above has changed.
 - **Connect/reconnect blindness: REAL, bounded, not fixable here.** A flow that
   is already established when the daemon connects gets `flow_stats` but never a
   `flow` event (§2.4), so its identity never arrives and its ongoing bytes
@@ -483,6 +503,31 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
   wrong. No fix yet: `!dev_is_router` protects genuinely router-originated
   traffic and cannot simply be removed, and `ip_nat` is not a reliable
   discriminator. See §3.2 for the fix direction.
+- ~~**CT_MAX described as a memory bound**~~ — FIXED 2026-08-24, also from the
+  panel. `ct_load()` called `fs.readfile()` and then `split(raw, "
+")`, which
+  materialised the whole conntrack table and the whole line array *before*
+  `CT_MAX` was consulted, so the constant bounded the retained map but not peak
+  allocation, and its own comment calling it a memory bound was wrong. It now
+  reads a line at a time via `fs.open()` / `read("line")`, so peak is one line
+  and the cap stops the work as well as the retention.
+
+  A second defect in the same function: the non-forced throttle read
+  `conntrack.entries && (now - conntrack.at) < CT_TTL_MS`. A snapshot that
+  parsed to zero rows while the file was readable made that falsy and disabled
+  the throttle entirely, and the non-forced path has no `CT_FORCE_MIN_MS` floor,
+  so every external flow identification re-read the whole file. Now gated on
+  `conntrack.at`, i.e. on having read recently rather than on having read
+  recently *and* found something.
+- **Byte conservation is now instrumented, not just asserted** (2026-08-24,
+  suggested by a panel juror). `status.bytes` reports `reported` (what netifyd
+  said moved, before any clamp or shadow decision), `attributed` (what reached
+  an aggregate), `shadowed` (what was deliberately dropped as a NAT twin) and
+  `leaked` (the residual, which should be 0). Both silent byte-loss defects this
+  daemon has had would have been visible here from the first minute. Measured 0
+  across every run since. In a NAT-ed transfer `reported` lands at roughly twice
+  wire truth with about half shadowed, which is the dual capture being
+  deduplicated, visible for the first time.
 - EA8500 resource baseline MEASURED (2026-08-21, light load, 12 flows,
   synthetic traffic): netifyd ~16.5 MB VSZ, ~0% CPU, box 95% idle, 397 MB
   free. Heavy-load measurement (real client routed through) still pending.
@@ -494,6 +539,29 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
   (§2.4, §2.5). Bounded to that window, self-healing, non-destructive. Cannot be
   fixed without an established-flow dump upstream. Documented in the
   README rather than hidden.
+- ~~**reshadow() exempted the flows it existed to correct**~~ — FOUND by an
+  adversarial panel and FIXED 2026-08-24. `reshadow()` returned early on
+  `dev_key == "router"`, which is exactly how a WAN-side capture of a NAT-ed
+  client flow is classified, because netifyd reports the post-translation
+  identity (§3.2). The conntrack twin resolution added earlier that day went
+  into `flow_identify()` and was never wired into `reshadow()`, so the one class
+  of flow it must correct was the one it skipped. It now calls `ct_nat_twin()`
+  and defaults the same way `flow_identify()` does.
+
+  Measured on hardware, NAT-ed client transfer with `appflowd` restarted
+  mid-flight, appflow total against the client veth's own tx counter:
+
+  | run | before fix | after fix |
+  |---|---|---|
+  | 1 | 0.701 | 0.892 |
+  | 2 | 0.791 | 1.013 |
+
+  No-restart control after the fix: 1.012. **A caveat worth keeping:** the panel
+  predicted a persistent *double* count of the central total. That is not what
+  was measured. The old code *under*-counted after a restart (0.70-0.79) and the
+  fix restores accuracy; it does not remove an inflation that was never
+  observed. The code defect was real, the predicted magnitude and sign were not.
+  The residual gap in run 1 is connect-blindness, below.
 - **Late re-point stranding (OPEN, unquantified).** If netifyd first reports a
   flow unclassified (`app_id <= 0`) and only later re-points it via a detection
   update, bytes counted before the re-point stay under Unknown, because the

@@ -129,7 +129,14 @@ let stats = {
 	// NAT twin resolution outcomes (3.2): twins shadowed on conntrack evidence,
 	// router-originated flows kept, and flows conntrack could not decide, which
 	// are shadowed on the safe default.
-	ct_twins: 0, ct_local: 0, ct_unresolved: 0
+	ct_twins: 0, ct_local: 0, ct_unresolved: 0,
+	// Purge-only flows rescued (see flow_update).  Expected to stay 0 on
+	// netifyd 4.4.7; a non-zero value means that assumption has changed.
+	purge_only: 0,
+	// Byte conservation (§2.5): reported == attributed + shadowed, or
+	// something is leaking.  Both silent byte-loss defects found in this
+	// daemon would have been visible here from the start.
+	bytes_reported: 0, bytes_attributed: 0, bytes_shadowed: 0
 };
 
 let start_ms = 0;
@@ -485,14 +492,22 @@ const store = {
  * ------------------------------------------------------------------ */
 
 function account(fr, d_local, d_other, ts) {
-	if (fr.shadow)                     // deduplicated NAT twin (§3.2)
+	if (fr.shadow) {                   // deduplicated NAT twin (§3.2)
+		// Deliberately dropped, not lost.  Counted so that
+		// bytes_reported == bytes_attributed + bytes_shadowed holds, and any
+		// residual is a real leak rather than the dedup doing its job.
+		let s = d_local + d_other;
+		if (s > 0)
+			stats.bytes_shadowed += s;
 		return;
+	}
 
 	let up = fr.dev_local ? d_local : d_other;
 	let down = fr.dev_local ? d_other : d_local;
 	if (up < 0) up = 0;
 	if (down < 0) down = 0;
 
+	stats.bytes_attributed += up + down;
 	fr.up += up;
 	fr.down += down;
 	fr.seen = ts;
@@ -766,19 +781,32 @@ function ct_load(now, force) {
 	if (force) {
 		if ((now - conntrack.at) < CT_FORCE_MIN_MS)
 			return;
-	} else if (conntrack.entries && (now - conntrack.at) < CT_TTL_MS) {
+	} else if (conntrack.at && (now - conntrack.at) < CT_TTL_MS) {
+		// Throttle on "we read recently", NOT on "we read recently and got
+		// entries".  Gating this on conntrack.entries meant a snapshot that
+		// parsed to zero rows while the file was readable disabled the throttle
+		// entirely, and the unforced path has no CT_FORCE_MIN_MS floor, so every
+		// external flow identification re-read the whole file.
 		return;
 	}
 	conntrack.at = now;
 	conntrack.probed = now;
 
-	let raw;
+	// Read INCREMENTALLY, one line at a time.  This used to be fs.readfile()
+	// followed by split(raw, "\n"), which materialised the entire conntrack
+	// table and then the entire line array before CT_MAX was ever consulted --
+	// so CT_MAX bounded the retained map but not peak allocation, and the
+	// comment on the constant calling it a memory bound was wrong.  On a busy
+	// router that is megabytes of transient garbage per read, on a device that
+	// may have 64 MB.  Reading a line at a time makes the peak one line, and
+	// the CT_MAX break now stops the work as well as the retention.
+	let fd;
 	try {
-		raw = fs.readfile(CONNTRACK_FILE);
+		fd = fs.open(CONNTRACK_FILE, "r");
 	} catch (e) {
-		raw = null;
+		fd = null;
 	}
-	if (!raw) {
+	if (!fd) {
 		if (conntrack.avail != false) {
 			conntrack.avail = false;
 			conntrack.map = {};
@@ -792,8 +820,11 @@ function ct_load(now, force) {
 	conntrack.avail = true;
 
 	let map = {}, n = 0;
-	for (let line in split(raw, "\n")) {
+	while (true) {
 		if (n >= CT_MAX)
+			break;
+		let line = fd.read("line");
+		if (line == null || !length(line))
 			break;
 		// Each line carries two tuples in order, original then reply.  Collect the
 		// fields positionally rather than matching the whole line: the optional
@@ -812,6 +843,7 @@ function ct_load(now, force) {
 		map[src[1] + "|" + dst[1] + "|" + sport[1] + "|" + dport[1]] = (src[0] != dst[1]);
 		n++;
 	}
+	try { fd.close(); } catch (e) {}
 	conntrack.map = map;
 	conntrack.entries = n;
 }
@@ -1003,11 +1035,30 @@ function flow_identify(fr, ev, f, now) {
 // (unshadowed -> shadowed), never resurrects.  The residual sign question for an
 // unidentifiable stub (a genuine NAT twin vs. pre-existing router-origin traffic,
 // both landing in the "unknown" bucket) is the same §3.2 bench-test item.
-function reshadow(fr) {
+function reshadow(fr, f, now) {
 	if (fr.shadow || !saw_internal || fr.internal)
 		return;
-	if (fr.dev_key == "router" || fr.dev_key == "multicast")
+	if (fr.dev_key == "multicast")
 		return;
+	if (fr.dev_key == "router") {
+		// A WAN-side capture of a NAT-ed client flow is classified "router",
+		// because netifyd reports the post-translation identity (§3.2).  That is
+		// precisely the class this function exists to correct, so the blanket
+		// `return` that stood here until 2026-08-24 exempted the only flows that
+		// needed it: after a restart, an established flow's external copy stayed
+		// counted alongside its internal twin for the flow's whole remaining
+		// life, and stats.shadowed never moved because there was no transition.
+		// Ask conntrack, exactly as flow_identify does, and default the same way.
+		let twin = ct_nat_twin(f, now);
+		if (twin == false) {
+			stats.ct_local++;
+			return;                  // conntrack says the router originated it
+		}
+		if (twin == null)
+			stats.ct_unresolved++;
+		else
+			stats.ct_twins++;
+	}
 	flow_detach(fr);
 	fr.shadow = true;
 	fr.a = null; fr.d = null; fr.c = null;
@@ -1119,9 +1170,29 @@ function ev_flow(ev, f, now) {
 // clamp guarantee in DESIGN §2.2 holds on every accounting path — including the
 // purge path, whose payload shape is the one the interface doc could not
 // capture live.
-function flow_update(fr, f, now) {
+function flow_update(fr, f, now, final) {
 	let dl = num(f.local_bytes, 0), do_ = num(f.other_bytes, 0);
 	let tb = num(f.total_bytes, 0);
+
+	// Byte conservation (§2.5).  What netifyd says this flow grew by, recorded
+	// before any clamping, so `bytes_reported` can be compared against what
+	// actually reached an aggregate.  A late stub's first update is skipped:
+	// its total_bytes is the flow's whole pre-adoption history, which this
+	// daemon deliberately does not attribute, and counting it would show as
+	// permanent false drift rather than as the connect-blindness it is.
+	// Byte conservation (§2.5).  netifyd's own statement of what moved, recorded
+	// BEFORE any clamp or shadow decision, so `leaked` in status exposes bytes
+	// that were reported to us and never reached an aggregate.  It has to mirror
+	// the basis attribution actually uses: where a baseline exists the
+	// cumulative growth is authoritative, otherwise the directional deltas are
+	// all there is.  A late stub's pre-adoption history is excluded by
+	// construction, because it lives in total_bytes and never in the deltas.
+	if (tb > 0 && fr.total > 0) {
+		let grew = tb - fr.total;
+		stats.bytes_reported += (grew < 0) ? tb : grew;
+	} else {
+		stats.bytes_reported += (dl + do_);
+	}
 
 	// Bound the deltas by total_bytes growth ONLY when total_bytes is usable
 	// (present and moving forward).  A missing or reset counter must not scale
@@ -1153,6 +1224,27 @@ function flow_update(fr, f, now) {
 			dl = fr.dev_local ? up_share : down_share;
 			do_ = fr.dev_local ? down_share : up_share;
 		}
+	} else if (final && tb > 0 && fr.total == 0 && !fr.late && (dl + do_) == 0) {
+		// PURGE-ONLY FLOW: a `flow` event created this record, no flow_stats ever
+		// arrived, and now the purge carries the final cumulative counter with
+		// both directional fields zero.  The branch above cannot run because it
+		// requires fr.total > 0, so without this the flow's entire byte count
+		// would be silently discarded -- and stats.no_total would not move
+		// either, because tb > 0.
+		//
+		// MEASURED 2026-08-24 (EA8500, netifyd 4.4.7): this does NOT fire on
+		// this netifyd.  Tapping the export socket for 170 s, 64 of 64 flows
+		// whose full lifecycle was observed carried a flow_stats before their
+		// purge, UDP DNS queries included.  DESIGN §2.5 reached the same
+		// conclusion from byte totals; this reached it from the events.
+		//
+		// It is here because that behaviour is undocumented and the daemon had
+		// no defence if it ever changed.  Late stubs are excluded: for those tb
+		// is pre-adoption history and injecting it would overcount.
+		stats.purge_only++;
+		dl = fr.dev_local ? 0 : tb;      // account() maps local/other -> up/down
+		do_ = fr.dev_local ? tb : 0;     // by dev_local; count it as download
+		stats.bytes_reported += tb;
 	} else if (tb <= 0) {
 		stats.no_total++;
 	}
@@ -1188,8 +1280,8 @@ function ev_flow_stats(ev, f, now) {
 		if (!fr)
 			return;
 	}
-	reshadow(fr);                        // close the stale-shadow double-count
-	flow_update(fr, f, now);
+	reshadow(fr, f, now);                // close the stale-shadow double-count
+	flow_update(fr, f, now, false);
 }
 
 function ev_purge(ev, f, now) {
@@ -1200,7 +1292,7 @@ function ev_purge(ev, f, now) {
 	// The purge carries the flow's final counter delta: account it, clamped like
 	// any other update, before the record goes away.
 	fr.reason = ev.reason ?? "purged";
-	flow_update(fr, f, now);
+	flow_update(fr, f, now, true);   // `final`: the purge-only rescue path
 	flow_drop(f.digest);
 }
 
@@ -1796,6 +1888,15 @@ function m_status(req) {
 	r.conntrack = { available: conntrack.avail, entries: conntrack.entries,
 	                twins: stats.ct_twins, router_local: stats.ct_local,
 	                unresolved: stats.ct_unresolved };
+	// Byte conservation (§2.5).  `leaked` is what netifyd reported growing
+	// that neither reached an aggregate nor was deliberately shadowed as a NAT
+	// twin.  It should sit at 0.  A number that climbs is a byte-accounting
+	// defect, which is exactly the class that was previously invisible here.
+	r.bytes = { reported: stats.bytes_reported,
+	            attributed: stats.bytes_attributed,
+	            shadowed: stats.bytes_shadowed,
+	            leaked: stats.bytes_reported - stats.bytes_attributed - stats.bytes_shadowed,
+	            purge_only_rescued: stats.purge_only };
 	r.aggregates = { apps: length(apps), devices: length(devs),
 	                 categories: length(cats), pruned: stats.aggs_pruned };
 	r.events = { total: stats.events, frames: stats.frames, malformed: stats.malformed,
