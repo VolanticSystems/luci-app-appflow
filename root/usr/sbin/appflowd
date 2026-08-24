@@ -61,6 +61,12 @@ const RECONNECT_MAX_MS = 30000;
 const CATEGORY_FILE = "/etc/netify.d/netify-categories.json";
 const LEASE_FILE = "/tmp/dhcp.leases";
 const STATUS_FILE = "/var/run/netifyd/status.json";
+const CONNTRACK_FILE = "/proc/net/nf_conntrack";
+
+const CT_TTL_MS = 2000;          // reuse one conntrack snapshot this long (3.2)
+const CT_RETRY_MS = 60000;       // re-probe an unreadable conntrack this often
+const CT_FORCE_MIN_MS = 250;     // floor between miss-driven refreshes (3.2)
+const CT_MAX = 8192;             // entries kept from one snapshot (memory bound, 3.3)
 
 const CFG_DEFAULTS = {
 	socket_path: "/var/run/netifyd/netifyd.sock",
@@ -69,6 +75,13 @@ const CFG_DEFAULTS = {
 	top_n: 10,
 	idle_timeout: 300
 };
+
+// Conntrack snapshot used to resolve NAT twins (3.2).  `map` is keyed on the
+// REPLY tuple, which is the view netifyd's external capture reports, and holds
+// true when that flow was source-translated.  `avail` is null until first
+// probed, then true/false; false is re-probed every CT_RETRY_MS so a conntrack
+// module loaded after us is picked up without needing a restart.
+let conntrack = { at: 0, probed: 0, avail: null, map: {}, entries: 0 };
 
 // Any event type matching this and carrying flow.digest finalises a flow.
 // netifyd 4.4.7 emits "flow_purge"; the regex keeps a renamed or additional
@@ -112,7 +125,11 @@ let stats = {
 	by_type: {}, reconnects: 0, connect_fail: 0, purges: 0,
 	flows_seen: 0, flows_late: 0, flows_pruned: 0, flows_dropped: 0,
 	shadowed: 0, aggs_pruned: 0, rx_bytes: 0, resyncs: 0, sweeps: 0,
-	no_total: 0, last_event_ms: 0, last_reset_ms: 0
+	no_total: 0, last_event_ms: 0, last_reset_ms: 0,
+	// NAT twin resolution outcomes (3.2): twins shadowed on conntrack evidence,
+	// router-originated flows kept, and flows conntrack could not decide, which
+	// are shadowed on the safe default.
+	ct_twins: 0, ct_local: 0, ct_unresolved: 0
 };
 
 let start_ms = 0;
@@ -713,6 +730,112 @@ function flow_drop(digest) {
 }
 
 // Identify (or re-identify, on a detection update) an existing flow record.
+/* ------------------------------------------------------------------ *
+ * NAT twin resolution (3.2)
+ * ------------------------------------------------------------------ */
+
+// On the EXTERNAL (WAN) capture of a NAT-ed flow, netifyd 4.4.7 reports the
+// POST-translation identity: local_ip and local_mac are this router's own WAN
+// address and MAC.  That is indistinguishable from a flow the router itself
+// originated, so the capture cannot be classified from the event alone.
+//
+// netifyd's own ip_nat field is exactly the question being asked, and it is
+// carried on the record as fr.nat, but 4.4.7 does not set it on this path:
+// measured 0 true out of 24 external captures of genuinely NAT-ed client
+// flows, and 0 out of 24 on the matching internal captures.  It is therefore
+// read but never trusted as evidence.
+//
+// conntrack does know, because it holds both halves of the translation.  For a
+// masqueraded flow the ORIGINAL source is the LAN client while the REPLY
+// destination is this router's WAN address; for router-originated traffic the
+// two are the same address:
+//
+//   src=192.168.1.50  dst=P ... src=P dst=192.168.72.10   <- client, NAT-ed
+//   src=192.168.72.10 dst=Q ... src=Q dst=192.168.72.10   <- router's own
+//
+// Reading a snapshot is not free, so it is reused for CT_TTL_MS: a burst of new
+// flows shares one read, and an idle router never reads at all, because loading
+// is demand-driven from ct_nat_twin() below.
+function ct_load(now, force) {
+	if (conntrack.avail == false && (now - conntrack.probed) < CT_RETRY_MS)
+		return;
+	// A forced reload comes from a lookup miss, which is the ordinary case for a
+	// flow younger than the current snapshot.  Honour it, but never more often
+	// than CT_FORCE_MIN_MS, so a burst of new flows cannot turn into a burst of
+	// reads of a file that is large on a busy router.
+	if (force) {
+		if ((now - conntrack.at) < CT_FORCE_MIN_MS)
+			return;
+	} else if (conntrack.entries && (now - conntrack.at) < CT_TTL_MS) {
+		return;
+	}
+	conntrack.at = now;
+	conntrack.probed = now;
+
+	let raw;
+	try {
+		raw = fs.readfile(CONNTRACK_FILE);
+	} catch (e) {
+		raw = null;
+	}
+	if (!raw) {
+		if (conntrack.avail != false) {
+			conntrack.avail = false;
+			conntrack.map = {};
+			conntrack.entries = 0;
+			logonce("ct-missing", "warn",
+			        "%s unreadable: cannot distinguish a NAT twin from router-originated traffic, so external captures are shadowed while an internal capture runs. Client accounting stays correct; the router's own traffic is not attributed.",
+			        CONNTRACK_FILE);
+		}
+		return;
+	}
+	conntrack.avail = true;
+
+	let map = {}, n = 0;
+	for (let line in split(raw, "\n")) {
+		if (n >= CT_MAX)
+			break;
+		// Each line carries two tuples in order, original then reply.  Collect the
+		// fields positionally rather than matching the whole line: the optional
+		// state word (TIME_WAIT, [UNREPLIED], ...) shifts the columns and differs
+		// between protocols.
+		let src = [], dst = [], sport = [], dport = [];
+		for (let tok in split(line, " ")) {
+			if (substr(tok, 0, 4) == "src=")        push(src, substr(tok, 4));
+			else if (substr(tok, 0, 4) == "dst=")   push(dst, substr(tok, 4));
+			else if (substr(tok, 0, 6) == "sport=") push(sport, substr(tok, 6));
+			else if (substr(tok, 0, 6) == "dport=") push(dport, substr(tok, 6));
+		}
+		if (length(src) < 2 || length(dst) < 2 || length(sport) < 2 || length(dport) < 2)
+			continue;
+		// Key on the reply tuple; value is whether the source was translated.
+		map[src[1] + "|" + dst[1] + "|" + sport[1] + "|" + dport[1]] = (src[0] != dst[1]);
+		n++;
+	}
+	conntrack.map = map;
+	conntrack.entries = n;
+}
+
+// true  = this external capture is the WAN-side twin of a NAT-ed LAN flow
+// false = conntrack positively says the router originated it
+// null  = conntrack cannot say (absent, unreadable, or the entry has expired)
+function ct_nat_twin(f, now) {
+	let key = (f.other_ip ?? "") + "|" + (f.local_ip ?? "") + "|" +
+	          (f.other_port ?? "") + "|" + (f.local_port ?? "");
+	ct_load(now, false);
+	let v = conntrack.entries ? conntrack.map[key] : null;
+	// A miss usually means the flow is newer than the snapshot, because netifyd
+	// identifies a flow within moments of it starting.  Refresh once and retry
+	// before giving up: without this the common case resolves to "unknown" and
+	// every router-originated flow is shadowed, which silently degrades to the
+	// no-conntrack behaviour even though conntrack is available.
+	if (v == null && conntrack.avail != false) {
+		ct_load(now, true);
+		v = conntrack.entries ? conntrack.map[key] : null;
+	}
+	return (v == null) ? null : v;
+}
+
 function flow_identify(fr, ev, f, now) {
 	let app_id = num(f.detected_application, 0);
 	let proto_id = num(f.detected_protocol, 0);
@@ -792,7 +915,35 @@ function flow_identify(fr, ev, f, now) {
 	// ip_nat is set, remain the open bench-test item in DESIGN §3.2 / §8.
 	if (fr.internal)
 		saw_internal = true;
-	let want_shadow = (saw_internal && !fr.internal && !dev_is_router && !group);
+
+	// Single-count decision for an EXTERNAL capture, once an internal capture is
+	// known to be running.  Two cases, and they are not symmetric:
+	//
+	//   device is not the router -> a LAN client seen on the WAN side, which only
+	//                               happens as the twin of its own internal
+	//                               capture.  Shadow it.
+	//   device IS the router     -> ambiguous by construction, because netifyd
+	//                               reports the post-NAT identity.  Ask conntrack.
+	//
+	// When conntrack cannot answer, shadow.  The two possible errors are not
+	// equal: counting a twin double-counts a client's entire traffic, measured at
+	// 163-199% of wire truth, while shadowing router-originated traffic omits the
+	// router's own DNS, NTP and updates.  Default to the smaller error.
+	let want_shadow = false;
+	if (saw_internal && !fr.internal && !group) {
+		if (!dev_is_router)
+			want_shadow = true;
+		else {
+			let twin = ct_nat_twin(f, now);
+			want_shadow = (twin != false);
+			if (twin == null)
+				stats.ct_unresolved++;
+			else if (twin)
+				stats.ct_twins++;
+			else
+				stats.ct_local++;
+		}
+	}
 
 	if (fr.app_key == key && fr.cat_key == cat && fr.dev_key == dkey &&
 	    fr.shadow == want_shadow) {
@@ -1637,6 +1788,14 @@ function m_status(req) {
 	            pruned: stats.flows_pruned, dropped: stats.flows_dropped,
 	            shadowed: stats.shadowed, purged: stats.purges,
 	            no_total: stats.no_total };
+	// NAT twin resolution (3.2).  `available` false means conntrack could not
+	// be read, in which case external captures are shadowed on the safe
+	// default and the router's own traffic is not attributed.  A persistently
+	// high `unresolved` means entries are expiring before the flow is
+	// classified, which has the same effect for those flows.
+	r.conntrack = { available: conntrack.avail, entries: conntrack.entries,
+	                twins: stats.ct_twins, router_local: stats.ct_local,
+	                unresolved: stats.ct_unresolved };
 	r.aggregates = { apps: length(apps), devices: length(devs),
 	                 categories: length(cats), pruned: stats.aggs_pruned };
 	r.events = { total: stats.events, frames: stats.frames, malformed: stats.malformed,

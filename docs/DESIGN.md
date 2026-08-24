@@ -220,7 +220,42 @@ twin"). The two differ only for flows that appear on the WAN side alone, and
 `fr.nat` (`ip_nat`) is retained as a diagnostic field in the `flows` method but
 drives no decision.
 
-**CONFIRMED DEFECT, 2026-08-24. This double-counts.** An earlier revision of
+**FIXED 2026-08-24 by consulting conntrack. The history below is kept because
+the mistakes are the instructive part.**
+
+netifyd cannot answer this question, so appflowd now asks the kernel. For each
+external capture whose device resolves to the router, `ct_nat_twin()` looks the
+flow up in `/proc/net/nf_conntrack` on its reply tuple and compares the ORIGINAL
+source against the reply destination: they differ for a masqueraded client and
+match for router-originated traffic. Snapshots are reused for `CT_TTL_MS`, and a
+lookup miss forces one refresh (floored at `CT_FORCE_MIN_MS`) because a flow is
+normally younger than the current snapshot. If conntrack cannot be read at all
+the code shadows on the safe default and says so once in the log, which keeps
+client accounting correct at the cost of not attributing the router's own
+traffic.
+
+Measured after the fix, against wire ground truth from interface counters:
+
+| | wire truth | attributed | |
+|---|---|---|---|
+| NAT-ed client | 21,323,454 | 21,287,298 | 99.8% |
+| router's own | 6,290,088 | 6,157,849 | 97.9% |
+
+with `conntrack: available true, twins 20, router_local 2, unresolved 2`. Both
+are counted once. The fallback path was tested by pointing `CONNTRACK_FILE` at a
+non-existent path: totals stayed at 97% rather than doubling, `unresolved` rose
+to 16, and the warning fired.
+
+**A defect found in the first version of this very fix**, worth recording because
+it would have been invisible: caching the snapshot for 2 s meant new flows,
+which are exactly the ones needing classification, usually missed it. It looked
+like it worked (totals were right, because everything got shadowed) while
+silently degrading to the no-conntrack behaviour with conntrack fully available.
+`unresolved: 20` against `router_local: 0` was the tell.
+
+---
+
+**The original defect, for the record. This used to double-count.** An earlier revision of
 this section, committed the same day, claimed the opposite and said the twin
 was correctly shadowed. That claim rested on a single measurement and was
 wrong; the correction and how it happened are recorded at the end of this
@@ -435,7 +470,11 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ~~ucode `publish()` reliability → decides §3 option A/B~~: resolved, §3
   states Option A shipped, proven reliable on 25.12.
-- **Dual-capture dedup DOUBLE-COUNTS NAT'd client traffic (CONFIRMED, §3.2).**
+- ~~Dual-capture dedup double-counts NAT'd client traffic~~ — FIXED 2026-08-24
+  (§3.2) by resolving the ambiguity through conntrack rather than guessing.
+  Client 99.8% and router 97.9% of wire truth, each counted once. Degrades
+  safely when conntrack is unreadable. Original defect description follows.
+- **(historical) The defect this replaced (§3.2).**
   netifyd 4.4.7 reports the router's own WAN MAC on the external capture of a
   NAT'd flow, so `dev_is_router` is true and `want_shadow` is false: the twin
   is counted again under `router`. Measured 163%, 196% and 199% of wire ground
