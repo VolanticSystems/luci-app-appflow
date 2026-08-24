@@ -63,6 +63,11 @@ left to be discovered. Details and supporting measurements are in
   and loses no byte totals. A future version could mitigate the
   `appflowd`-restart case by checkpointing its own identity map; the case where
   *netifyd* restarts cannot be fixed without support from netifyd.
+
+  Accuracy across a restart was measured in 1.0.2 against the client's own
+  interface counter: 0.89 and 1.01 of wire truth on two runs, against 0.70 and
+  0.79 before that release, with a no-restart control at 1.01. If you want an
+  exact figure, take it after the restart window rather than across it.
 - **Accurate accounting for clients behind NAT needs conntrack.** netifyd
   reports the WAN-side capture of a NAT'd flow using the router's own address,
   which is indistinguishable from traffic the router originated. appflow
