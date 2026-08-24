@@ -220,16 +220,46 @@ twin"). The two differ only for flows that appear on the WAN side alone, and
 `fr.nat` (`ip_nat`) is retained as a diagnostic field in the `flows` method but
 drives no decision.
 
-**Open, and honestly unvalidated (the §8 bench test).** This sandbox never NATs
-a client through its WAN, so the rule is confirmed only for the one case
-observed (router-origin + LAN-client on the default `-I br-lan -E wan`). The
-single fact that decides the NAT case is **what netifyd 4.4.7 puts in
-`local_mac`/`other_mac` when `ip_nat` is true**: if those still carry the
-router's WAN MAC, `dev_is_router` is true on the twin and it is correctly
-shadowed; if netifyd substitutes the client identity, `dev_is_router` is false
-and the twin would be dropped instead. Resolve by routing one real client
-through the box and comparing the Overview total against the interface byte
-counters, before changing the rule. ⏳
+**RESOLVED on hardware, 2026-08-24.** The deciding fact was what netifyd 4.4.7
+puts in `local_mac`/`other_mac` when `ip_nat` is true. Measured: **it carries
+the router's own WAN identity, not the client's.** A NAT'd flow's external
+capture reports
+
+```json
+{ "ip_nat": true, "local_ip": "192.168.72.10",
+  "local_mac": "c0:56:27:4e:3e:92", "local_origin": true,
+  "other_ip": "172.66.0.218" }
+```
+
+where `192.168.72.10` / `c0:56:27:4e:3e:92` are this router's WAN address and
+MAC, while the internal capture of the same flow carries the real client
+(`192.168.1.50`). So `dev_is_router` is true on the twin and the shadow rule
+suppresses it, which is the branch that was hoped for: the twin is **shadowed,
+not dropped**.
+
+Verified end to end by giving the router a genuine NAT'd client of its own: a
+veth pair into a network namespace attached to `br-lan`, addressed
+`192.168.1.50/24` with a default route through the router, so its traffic is
+really forwarded and really NATed. Pulling 20,000,000 bytes through it:
+
+| | bytes |
+|---|---|
+| ground truth delivered to the client (veth counter) | ~20.97 M |
+| appflow, attributed to the client device | 20,950,037 down |
+| appflow, attributed to the Router pseudo-device | 452 |
+
+The client is credited essentially all of it, the router essentially none, and
+`status.flows` reported `shadowed` incrementing with `dropped: 0`. No
+double-count and no loss.
+
+**Methodology warning for anyone repeating this.** An earlier run of the same
+test reported 69% and then a spread of 46-101%, which would have been a serious
+false finding. Both were the measurement, not the daemon: the first sampled
+before the flow had purged and immediately after an `appflowd` restart (so it
+also measured connect-blindness, §2.5), and the spread came from fragile shell
+parsing picking the wrong record out of the JSON. Let `appflowd` settle before
+the flow starts, let the flow purge before sampling, and read the numbers
+directly rather than through `grep`.
 
 **Related sub-case, now mitigated.** A pre-existing external flow captured only
 as a stub (`flow_stats` before any `flow` event) is identified once, before
@@ -358,8 +388,12 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ~~ucode `publish()` reliability → decides §3 option A/B~~: resolved, §3
   states Option A shipped, proven reliable on 25.12.
-- Dual-capture dedup heuristic needs empirical validation (§3.2): still
-  outstanding, no NAT client available on the test bench.
+- ~~Dual-capture dedup heuristic needs empirical validation~~ — RESOLVED
+  2026-08-24 (§3.2). netifyd 4.4.7 reports the router's own WAN MAC on the
+  external capture of a NAT'd flow, so the twin is shadowed rather than
+  dropped. Verified with a real NAT'd client (netns + veth on `br-lan`):
+  20 MB pulled, client credited 20,950,037 bytes down, Router pseudo-device
+  452. No double-count, no loss.
 - EA8500 resource baseline MEASURED (2026-08-21, light load, 12 flows,
   synthetic traffic): netifyd ~16.5 MB VSZ, ~0% CPU, box 95% idle, 397 MB
   free. Heavy-load measurement (real client routed through) still pending.
