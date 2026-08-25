@@ -318,9 +318,25 @@ return view.extend({
 			]));
 
 		apps.forEach(function(a) {
+			/* Keyboard-reachable, not mouse-only. The per-device drawer is the
+			 * feature this whole view exists for and until 2026-08-25 a `click`
+			 * handler was the only way in: no tabindex, no role, no key
+			 * handler anywhere in this package. role=button plus tabindex puts
+			 * the row in the tab order and makes it announce as activatable;
+			 * Enter and Space are the two keys a button is required to answer.
+			 * Raised by a code-review panel. */
 			rows.push(E('tr', {
 				'class': 'tr af-row',
 				'title': _('Show per-device details'),
+				'role': 'button',
+				'tabindex': '0',
+				'aria-label': _('Show per-device details for %s').format(a.label || a.key),
+				'keydown': L.bind(function(app, ev) {
+					if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar')
+						return;
+					ev.preventDefault();   /* Space would scroll the page */
+					self.handleDetail(app, ev);
+				}, self, a),
 				'click': L.bind(self.handleDetail, self, a)
 			}, [
 				E('td', { 'class': 'td' }, [ appflow.appCell(a) ]),
@@ -377,7 +393,10 @@ return view.extend({
 
 		var d = detail || {},
 		    totals = appflow.normTotals(d.metrics || d.totals || d),
-		    series = appflow.normSeries(d.time_series || d.series || app.series),
+		    /* Do not re-normalise app.series: normApp() already did. The alias
+		     * fix in common.js makes that harmless now, but normalising once is
+		     * the actual intent and it keeps the fallback readable. */
+		    series = appflow.normSeries(d.time_series || d.series),
 		    devices = appflow.toList(d.devices || d.clients || d.mac_addresses, 'mac')
 			.map(function(x) { return appflow.normDevice(x); })
 			.filter(function(x) { return x.total > 0; })

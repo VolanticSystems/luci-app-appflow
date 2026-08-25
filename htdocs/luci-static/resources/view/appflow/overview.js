@@ -235,7 +235,15 @@ return view.extend({
 						[ 'category', 'category_name', 'cat', 'key', 'name', 'label' ])),
 					key: appflow.str(c,
 						[ 'category', 'category_name', 'cat', 'key', 'name', 'label' ]),
-					value: t.total || t.rate
+					/* Cumulative bytes ONLY. This used to be `t.total || t.rate`,
+					 * so a category carrying a rate but a zero/absent byte total
+					 * contributed a RATE into a sum of byte totals, which the
+					 * doughnut centre then printed through fmtBytes under a card
+					 * caption reading "top, by cumulative bytes". The fallback
+					 * looked like belt-and-braces and was actually a silent unit
+					 * mix; a row with no bytes is filtered out below, which is
+					 * the honest outcome. Found by a code-review panel. */
+					value: t.total
 				};
 			})
 			.filter(function(c) { return c.value > 0; })

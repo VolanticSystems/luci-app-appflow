@@ -126,8 +126,20 @@ var CATEGORY_LABELS = {
  *
  * Note that `tag` is deliberately NOT a category alias: on the live aggregates
  * it carries the raw detection tag ("netify.openwrt"), not a category. */
-var A_DL   = [ 'download', 'bytes_down', 'rx_bytes', 'download_bytes', 'total_download' ],
-    A_UL   = [ 'upload', 'bytes_up', 'tx_bytes', 'upload_bytes', 'total_upload' ],
+/* `dl` and `ul` are this module's OWN output names, listed here so the
+ * normalisers are idempotent. Without them normSeries() was destructive on a
+ * second pass: it reads components through these lists and the total through
+ * A_TOT, so re-normalising already-normalised data yielded
+ *   { t: <real>, dl: 0, ul: 0, total: <real> }
+ * -- a total that contradicts its own parts. statistics.js:380 does exactly
+ * that when it falls through to `app.series`, which normApp() has already
+ * normalised, and columnChart reads only p.dl/p.ul, so it drew an EMPTY framed
+ * plot under a KPI row reporting megabytes. Worse, series.length was still 12,
+ * so the honest "No time series available" branch never ran.
+ * Found by a code-review panel, 2026-08-25. No daemon field is named dl or ul,
+ * so the aliases are inert against real payloads. */
+var A_DL   = [ 'download', 'bytes_down', 'rx_bytes', 'download_bytes', 'total_download', 'dl' ],
+    A_UL   = [ 'upload', 'bytes_up', 'tx_bytes', 'upload_bytes', 'total_upload', 'ul' ],
     A_TOT  = [ 'total', 'bytes_total', 'total_bytes', 'total_traffic' ],
     A_RDL  = [ 'rate_down', 'rx_rate', 'download_rate', 'down_rate' ],
     A_RUL  = [ 'rate_up', 'tx_rate', 'upload_rate', 'up_rate' ],
@@ -221,7 +233,7 @@ rect.af-col.af-ul{fill:var(--success-color-high)}\
 .af-dot{display:inline-block;width:9px;height:9px;border-radius:2px;flex:0 0 9px}\
 .af-donut-wrap{display:flex;align-items:center;gap:1.2em;flex-wrap:wrap}\
 .af-donut{position:relative;width:128px;height:128px;flex:0 0 128px}\
-.af-donut > svg{display:block;width:100%;height:100%;transform:rotate(-90deg)}\
+.af-donut > svg{display:block;width:100%;height:100%}\
 .af-donut-track{stroke:var(--background-color-medium)}\
 .af-donut-mid{position:absolute;left:0;right:0;top:0;bottom:0;display:flex;\
  flex-direction:column;align-items:center;justify-content:center;\
@@ -550,7 +562,16 @@ return baseclass.extend({
 		if (!s.length || s == 'unclassified' || s == 'unknown')
 			return NEUTRAL;
 
-		if (CATEGORY_SLOT[s] != null)
+		/* hasOwnProperty, not a bare lookup. `s` is attacker-influenced -- it
+		 * comes from a category tag, an app label, or a DHCP hostname -- and a
+		 * plain object literal inherits Object.prototype, so CATEGORY_SLOT
+		 * ['constructor'], ['__proto__'] and ['toString'] all pass an
+		 * `!= null` test and index PALETTE with a function, yielding undefined.
+		 * A device named `constructor` then rendered style="background:undefined",
+		 * which the browser drops, leaving white tile text on a transparent
+		 * tile; in the doughnut the slice silently did not draw while its legend
+		 * still claimed a percentage. Found by a code-review panel, 2026-08-25. */
+		if (Object.prototype.hasOwnProperty.call(CATEGORY_SLOT, s))
 			return PALETTE[CATEGORY_SLOT[s]];
 
 		var h = 0;
@@ -596,7 +617,8 @@ return baseclass.extend({
 		if (iconMap == null || !t.length)
 			return null;
 
-		var e = iconMap[t];
+		/* Same prototype hazard as color() above: `t` is a daemon-supplied tag. */
+		var e = Object.prototype.hasOwnProperty.call(iconMap, t) ? iconMap[t] : null;
 
 		if (e == null || typeof e.file != 'string' || !ICON_FILE.test(e.file))
 			return null;
@@ -853,10 +875,14 @@ return baseclass.extend({
 				'class': 'af-plot',
 				'style': 'height:%dpx'.format(opts.height || 168)
 			}, [
+				/* role=img with no accessible name announces as an unlabelled
+				 * image, which is worse than leaving the role off entirely.
+				 * Callers may pass opts.label; there is always a fallback. */
 				this.svg('svg', {
 					'viewBox': '0 0 %d %d'.format(W, H),
 					'preserveAspectRatio': 'none',
-					'role': 'img'
+					'role': 'img',
+					'aria-label': opts.label || _('Traffic over time')
 				}, kids),
 				this.yAxis(peak, fmt)
 			]),
@@ -938,7 +964,8 @@ return baseclass.extend({
 				this.svg('svg', {
 					'viewBox': '0 0 %d %d'.format(W, H),
 					'preserveAspectRatio': 'none',
-					'role': 'img'
+					'role': 'img',
+					'aria-label': opts.label || _('Traffic per interval')
 				}, kids),
 				this.yAxis(peak, function(v) { return self.fmtBytes(v); })
 			]),
@@ -955,7 +982,15 @@ return baseclass.extend({
 
 		var self = this,
 		    total = slices.reduce(function(a, s) { return a + Math.max(0, s.value); }, 0),
-		    off = 25, /* rotate so the first slice starts at 12 o'clock */
+		    /* An SVG circle's stroke starts at 3 o'clock, so a dashoffset of a
+		     * quarter of the circumference (r is 15.91549, so C is ~100) starts
+		     * the first slice at 12 o'clock. This is the ONLY rotation now:
+		     * `.af-donut > svg` also carried transform:rotate(-90deg) until
+		     * 2026-08-25, the two stacked, and the first slice actually began at
+		     * 9 o'clock -- so this comment asserted something the render did not
+		     * do. Found by a code-review panel. If you re-add a CSS rotation,
+		     * take this offset out. */
+		    off = 25,
 		    ring = [ this.svg('circle', {
 			'class': 'af-donut-track',
 			'cx': 21, 'cy': 21, 'r': 15.91549,
@@ -994,7 +1029,8 @@ return baseclass.extend({
 
 		return E('div', { 'class': 'af-donut-wrap' }, [
 			E('div', { 'class': 'af-donut' }, [
-				this.svg('svg', { 'viewBox': '0 0 42 42', 'role': 'img' }, ring),
+				this.svg('svg', { 'viewBox': '0 0 42 42', 'role': 'img',
+			                  'aria-label': _('Share of traffic by category') }, ring),
 				E('div', { 'class': 'af-donut-mid' }, [
 					E('strong', {}, [ opts.center || this.fmtBytes(total) ]),
 					E('span', {}, [ opts.centerLabel || _('total') ])
@@ -1039,7 +1075,10 @@ return baseclass.extend({
 		var denied = (kind === 'denied');
 
 		return E('div', { 'class': 'cbi-section af-card af-empty' }, [
-			this.svg('svg', { 'viewBox': '0 0 24 24', 'role': 'img' }, [
+			/* Decorative: the <h3> directly below says the same thing in words,
+			 * so this triangle is hidden from assistive tech rather than given
+			 * a name that would be read out twice. */
+			this.svg('svg', { 'viewBox': '0 0 24 24', 'aria-hidden': 'true' }, [
 				this.svg('path', {
 					'd': 'M12 2 1 21h22L12 2zm0 5 7.5 12.9h-15L12 7zm-1 4v5h2v-5h-2zm0 6v2h2v-2h-2z'
 				})
