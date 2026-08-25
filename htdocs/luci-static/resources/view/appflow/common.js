@@ -32,8 +32,16 @@ function declare(method, params) {
 }
 
 /* §5 also defines `apps` and `flows`; neither v1 view needs them, so they are
- * intentionally not bound here. Add them the same way if a view grows to use
- * them. `params` is positional: callStats('hour'), callDetail('a10465'). */
+ * intentionally not bound here -- and as of 2026-08-25 the rpcd ACL does not
+ * grant them either. A security audit pointed out that this comment was the
+ * evidence: the frontend had been deliberately narrowed and the boundary file
+ * had not, so an account restricted to this package alone could still call
+ * `flows` directly through /cgi-bin/luci/admin/ubus. That one matters more than
+ * the others, because every method the UI does use returns an AGGREGATE, while
+ * `flows` is the live per-connection table -- which local device is talking to
+ * which remote endpoint, right now. If a view grows to need either, bind it
+ * here AND add it back to the ACL, in that order.
+ * `params` is positional: callStats('hour'), callDetail('a10465'). */
 var callStatus  = declare('status'),
     callSummary = declare('summary'),
     callDevices = declare('devices'),
@@ -670,14 +678,24 @@ return baseclass.extend({
 	},
 
 	/* Two-tone download/upload bar, scaled against `max`. */
-	bar: function(dl, ul, max) {
+	/* `fmt` names the unit the caller is passing, because two of the three
+	 * callers pass cumulative bytes and one passes rates. The tooltip formatted
+	 * with fmtBytes unconditionally until 2026-08-25, so on the Overview's Top
+	 * applications table the numeric cells read "1.20 MB/s" while hovering the
+	 * bar in the same row read "Download: 1.20 MB" -- the same quantity stated
+	 * twice, in two units, one of them wrong, and the wrong one being the one
+	 * that looks cumulative. Fixed here rather than at the call site so the next
+	 * caller cannot step on it, and so the translated string stops having to
+	 * serve two unit systems at once. */
+	bar: function(dl, ul, max, fmt) {
 		var m = (max > 0) ? max : 1,
 		    w1 = Math.max(0, Math.min(100, 100 * dl / m)),
-		    w2 = Math.max(0, Math.min(100 - w1, 100 * ul / m));
+		    w2 = Math.max(0, Math.min(100 - w1, 100 * ul / m)),
+		    f = (typeof fmt === 'function') ? fmt : this.fmtBytes;
 
 		return E('div', {
 			'class': 'af-bar',
-			'title': _('Download: %s, upload: %s').format(this.fmtBytes(dl), this.fmtBytes(ul))
+			'title': _('Download: %s, upload: %s').format(f.call(this, dl), f.call(this, ul))
 		}, [
 			E('i', { 'class': 'af-dl', 'style': 'width:%.2f%%'.format(w1) }),
 			E('i', { 'class': 'af-ul', 'style': 'width:%.2f%%'.format(w2) })
@@ -852,9 +870,23 @@ return baseclass.extend({
 	columnChart: function(points, opts) {
 		opts = opts || {};
 
+		/* `slots` is the width of the axis the CALLER labels, in buckets. A
+		 * partial series is drawn right-aligned against it, so three buckets
+		 * occupy the last three of sixty rather than being stretched across the
+		 * whole width beneath a label reading "-60 min".
+		 *
+		 * That stretch was the behaviour until 2026-08-25, and it was not an
+		 * edge case: this daemon keeps nothing across a restart by design, so
+		 * every boot, every `uci commit appflow`, and every fresh install spent
+		 * its first hour showing a chart that asserted an hour of history it did
+		 * not have. lineChart already did this correctly for the same problem,
+		 * which is what made it a defect rather than a decision. Omit `slots`
+		 * and the old full-width behaviour is kept, for any caller that really
+		 * is showing a complete series. */
 		var self = this,
 		    W = 1000, H = 240,
 		    n = Math.max(1, points.length),
+		    slots = Math.max(n, opts.slots || 0),
 		    peak = 0;
 
 		points.forEach(function(p) {
@@ -865,14 +897,15 @@ return baseclass.extend({
 		peak = this.niceMax(peak * 1.05);
 
 		var kids = this.gridLines(W, H),
-		    slot = W / n,
+		    slot = W / slots,
 		    bw = slot * 0.6,
-		    pad = (slot - bw) / 2;
+		    pad = (slot - bw) / 2,
+		    off = (slots - n) * slot;   /* right-align a partial series */
 
 		points.forEach(function(p, i) {
 			var hdl = H * Math.max(0, Math.min(1, p.dl / peak)),
 			    hul = H * Math.max(0, Math.min(1, p.ul / peak)),
-			    x = i * slot + pad,
+			    x = off + i * slot + pad,
 			    when = p.t
 				? new Date(p.t < 1e11 ? p.t * 1000 : p.t)
 					.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })

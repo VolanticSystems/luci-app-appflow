@@ -5,10 +5,8 @@
 			"ubus": {
 				"appflow": [
 					"summary",
-					"apps",
 					"devices",
 					"app_detail",
-					"flows",
 					"stats",
 					"status"
 				]
