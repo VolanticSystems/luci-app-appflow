@@ -211,6 +211,7 @@ var CSS = '\
  background:var(--background-color-medium);overflow:hidden;\
  box-shadow:inset 0 0 0 1px var(--border-color-low)}\
 .af-bar > i{display:block;height:100%;transition:width .3s ease-out}\
+.af-bar > i:last-child{border-top-right-radius:4px;border-bottom-right-radius:4px}\
 i.af-dl{background:var(--primary-color-high,hsl(210,58%,46%))}\
 i.af-ul{background:var(--success-color-high,hsl(150,50%,36%))}\
 .af-kpi{display:flex;flex-wrap:wrap;gap:1.4em 2.4em;margin:0 0 1.1em}\
