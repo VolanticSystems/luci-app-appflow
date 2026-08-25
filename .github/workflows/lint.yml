@@ -70,7 +70,7 @@ jobs:
           exit "$rc"
 
   shellcheck:
-    name: shellcheck (init.d / uci-defaults)
+    name: shellcheck (init.d / uci-defaults / tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,14 +125,28 @@ jobs:
           # Collect only paths that actually exist: a package may ship an
           # init script, uci-defaults, both or neither, and an unmatched glob
           # would otherwise be passed to shellcheck as a literal filename.
-          files=$(find root/etc/init.d root/etc/uci-defaults \
-                    -type f 2>/dev/null || true)
+          # tests/ is linted deliberately. The hardware suite is what decides
+          # whether everything else in this repo is trustworthy, and it went
+          # unlinted until 2026-08-25: untested test code, which is the same
+          # shape of defect this project keeps finding in its own work.
+          files=$(
+            find root/etc/init.d root/etc/uci-defaults -type f 2>/dev/null
+            find tests -type f -name '*.sh' 2>/dev/null
+          )
           # Both packages DO ship an init script, so an empty list means the
           # tree moved or a rename broke the path, not that there is nothing to
           # check. Passing silently here is how a lint job goes green while
           # verifying nothing.
           if [ -z "$files" ]; then
             echo "::error::no shell scripts found under root/etc: expected an init script"
+            exit 1
+          fi
+          # And assert the suite specifically, because the guard above only
+          # catches "nothing at all". A tests/ rename would otherwise drop the
+          # test scripts from linting while the job stayed green on the init
+          # script alone.
+          if [ -d tests ] && ! echo "$files" | grep -q '^tests/'; then
+            echo "::error::tests/ exists but no *.sh was collected from it"
             exit 1
           fi
           echo "Checking:"; echo "$files"
