@@ -132,6 +132,21 @@ participate and throttling is impossible by construction.
   that prediction is **refuted** on this hardware, because netifyd supplies
   accountable byte counts for sub-interval flows.
 
+  **CORRECTED 2026-08-25. The two paragraphs below understated this, and the
+  review panel was right.** Once `purge_only_rescued` was instrumented and left
+  running against ordinary traffic, it reported **13 purge-only flows out of
+  1,341 seen, 0.97%**. Flows purged without ever receiving a `flow_stats` DO
+  occur on netifyd 4.4.7. Before the defensive path was added, every one of them
+  lost its entire byte count silently, which is exactly what three carriers
+  predicted and what this section briefly called refuted.
+
+  The refutation was under-powered, not wrong-headed: a 38-flow capture at a
+  0.97% rate has an expected count of 0.4, so observing none said almost
+  nothing. Reading "0 of 38" as "netifyd never does this" was the error, and the
+  lesson is that a negative result needs its sample size checked against the
+  rate it claims to exclude. The event-level evidence below is still accurate
+  about what it saw; it simply did not see enough.
+
   **Re-tested at the EVENT level 2026-08-24, after an adversarial review panel
   independently reached the same prediction three times.** The 2026-08-22 result
   above is outcome-based: it shows the bytes landed, not why. Tapping netifyd's
@@ -146,11 +161,13 @@ participate and throttling is impossible by construction.
   §2.4 connect-blindness, not this. Mistaking one for the other is easy and is
   why the analysis is stated at the level of *fully observed* lifecycles.
 
-  The gate is nonetheless now defended: `flow_update()` takes a `final` flag from
-  `ev_purge()` and attributes `total_bytes` if a purge-only flow ever does
-  arrive, counted in `stats.purge_only` and reported as
-  `status.bytes.purge_only_rescued`. Expected to stay 0 on this netifyd; a
-  non-zero value means the undocumented behaviour above has changed.
+  The gate is defended: `flow_update()` takes a `final` flag from `ev_purge()`
+  and attributes `total_bytes` for a purge-only flow, counted in
+  `stats.purge_only` and reported as `status.bytes.purge_only_rescued`. That
+  counter is **not** expected to stay 0 -- it runs at about 1% of flows -- and
+  it is the reason those bytes are now counted at all. Watch its rate rather
+  than its presence: a sharp rise means netifyd's event contract has shifted,
+  and a zero across a busy run means the rescue has regressed.
 - **Connect/reconnect blindness: REAL, bounded, not fixable here.** A flow that
   is already established when the daemon connects gets `flow_stats` but never a
   `flow` event (§2.4), so its identity never arrives and its ongoing bytes
