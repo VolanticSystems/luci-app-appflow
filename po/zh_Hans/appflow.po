@@ -8,7 +8,7 @@ msgid "All traffic"
 msgstr "全部流量"
 
 msgid "AppFlow"
-msgstr "AppFlow"
+msgstr "应用流量"
 
 msgid "Overview"
 msgstr "概览"
@@ -37,8 +37,14 @@ msgstr "AppFlow 统计数据已清除。"
 msgid "Application"
 msgstr "应用"
 
+msgid "Advertiser"
+msgstr "广告"
+
 msgid "App traffic statistics"
 msgstr "应用流量统计"
+
+msgid "Business"
+msgstr "商务"
 
 msgid "by current rate"
 msgstr "按当前速率"
@@ -139,11 +145,23 @@ msgstr "文件服务器"
 msgid "File Sharing"
 msgstr "文件共享"
 
+msgid "Financial"
+msgstr "金融"
+
 msgid "Flows tracked: %d"
 msgstr "已跟踪流数：%d"
 
+msgid "Games"
+msgstr "游戏"
+
+msgid "Hosting"
+msgstr "托管"
+
 msgid "Hosts"
 msgstr "主机"
+
+msgid "Infrastructure"
+msgstr "基础设施"
 
 msgid "IoT Devices"
 msgstr "物联网设备"
@@ -163,8 +181,17 @@ msgstr "实时的应用级流量，由路由器上的 Netify Agent 进行分类�
 msgid "Live throughput"
 msgstr "实时吞吐量"
 
+msgid "Mail"
+msgstr "邮件"
+
 msgid "Media Provider"
 msgstr "媒体服务商"
+
+msgid "Messaging"
+msgstr "即时通讯"
+
+msgid "Multicast / Broadcast"
+msgstr "组播 / 广播"
 
 msgid "Netify agent connected"
 msgstr "Netify Agent 已连接"
@@ -174,6 +201,12 @@ msgstr "Netify Agent 未连接"
 
 msgid "netifyd %s"
 msgstr "netifyd %s"
+
+msgid "Networking"
+msgstr "网络"
+
+msgid "News"
+msgstr "新闻"
 
 msgid "No active devices."
 msgstr "暂无活动设备。"
@@ -226,6 +259,9 @@ msgstr "远程桌面"
 msgid "Requires history storage (planned)"
 msgstr "需要历史数据存储（计划中）"
 
+msgid "Router"
+msgstr "路由器"
+
 msgid "router"
 msgstr "路由器"
 
@@ -234,6 +270,9 @@ msgstr "搜索应用名称"
 
 msgid "Share"
 msgstr "占比"
+
+msgid "Shopping"
+msgstr "购物"
 
 msgid "Showing the first %d applications; narrow the search to see the rest."
 msgstr "仅显示前 %d 个应用；请缩小搜索范围以查看其余应用。"
@@ -306,3 +345,9 @@ msgstr "VoIP"
 
 msgid "VPN & Proxy"
 msgstr "VPN 与代理"
+
+msgid "Web"
+msgstr "网页"
+
+msgid "Technology"
+msgstr "科技"
