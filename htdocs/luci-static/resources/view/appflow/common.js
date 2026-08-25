@@ -175,6 +175,7 @@ var CSS = '\
 .af-pill.af-ok > i{background:var(--success-color-high)}\
 .af-pill.af-warn{color:var(--error-color-high);border-color:var(--error-color-high)}\
 .af-pill.af-warn > i{background:var(--error-color-high)}\
+.af-pill.af-unknown > i{background:var(--text-color-low);opacity:.55}\
 .af-tile{display:inline-flex;align-items:center;justify-content:center;\
  width:26px;height:26px;flex:0 0 26px;border-radius:5px;color:#fff;\
  font-weight:600;font-size:12px;text-shadow:0 1px 1px rgba(0,0,0,.25)}\
@@ -1076,10 +1077,26 @@ return baseclass.extend({
 		    flows = s.flows || {},
 		    counts = s.aggregates || s.counts || {},
 		    agent = s.agent || {},
-		    connected = (s.agent_connected !== false) && (sock.connected !== false),
-		    bits = [ this.pill(connected
-			? _('Netify agent connected')
-			: _('Netify agent disconnected'), connected ? 'af-ok' : 'af-warn') ];
+		    /* TRI-STATE, deliberately. This used to be
+		     *   connected = (s.agent_connected !== false) && (sock.connected !== false)
+		     * which reads an ABSENT field as healthy, because `undefined !== false`
+		     * is true. Overview passes `status || summary`, so whenever the status
+		     * call fails this function is handed the summary payload instead, that
+		     * payload carries neither `agent_connected` nor `socket.connected`, and
+		     * the strip rendered a single green "Netify agent connected" pill.
+		     *
+		     * It failed GREEN on the one indicator whose whole job is to tell the
+		     * operator the collector is down, which is also the most common reason
+		     * the page is empty. Absent evidence is not positive evidence; unknown
+		     * is its own state and is drawn neutral. Found by a code-review panel,
+		     * 2026-08-25. */
+		    known = (s.agent_connected != null) || (sock.connected != null),
+		    connected = known && (s.agent_connected !== false) && (sock.connected !== false),
+		    bits = [ known
+			? this.pill(connected
+				? _('Netify agent connected')
+				: _('Netify agent disconnected'), connected ? 'af-ok' : 'af-warn')
+			: this.pill(_('Collector state unknown'), 'af-unknown') ];
 
 		if (flows.tracked != null)
 			bits.push(this.pill(_('Flows tracked: %d').format(this.num(flows, [ 'tracked' ]))));

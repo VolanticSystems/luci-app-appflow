@@ -125,6 +125,11 @@ let stats = {
 	by_type: {}, reconnects: 0, connect_fail: 0, purges: 0,
 	flows_seen: 0, flows_late: 0, flows_pruned: 0, flows_dropped: 0,
 	shadowed: 0, aggs_pruned: 0, rx_bytes: 0, resyncs: 0, sweeps: 0,
+	// Times an aggregate table was full of LIVE entries and a new key was
+	// therefore not tracked at all.  Distinct from aggs_pruned, which counts
+	// evictions of idle entries and is normal housekeeping.  A non-zero value
+	// here means the dashboard is silently incomplete.
+	aggs_refused: 0,
 	no_total: 0, last_event_ms: 0, last_reset_ms: 0,
 	// NAT twin resolution outcomes (3.2): twins shadowed on conntrack evidence,
 	// router-originated flows kept, and flows conntrack could not decide, which
@@ -394,6 +399,16 @@ function agg_make(tbl, kind, key, name, now) {
 		if (victim == null) {
 			// Every slot is backed by a live flow: refuse to grow (§3.3).
 			// Bytes still land in the totals, so the summary stays truthful.
+			// Counted, not just logged.  logonce() fires ONCE for the life of
+			// the process, so without this an operator polling status sees
+			// `devices: 384` and no sign that anything is being dropped -- the
+			// table looks healthy precisely when it has stopped accepting the
+			// device the user is looking for.  A security panel on 2026-08-25
+			// converged on this table being fillable by a LAN attacker
+			// (confirmed: six spoofed MACs produced six aggregates on
+			// hardware).  Evicting live data is already refused above, which is
+			// the right call; what was missing was any way to SEE the refusal.
+			stats.aggs_refused++;
 			logonce("aggfull", "warn", "%s table full (%d), not tracking %s",
 			        kind, AGG_MAX, key);
 			return null;
@@ -1898,7 +1913,8 @@ function m_status(req) {
 	            leaked: stats.bytes_reported - stats.bytes_attributed - stats.bytes_shadowed,
 	            purge_only_rescued: stats.purge_only };
 	r.aggregates = { apps: length(apps), devices: length(devs),
-	                 categories: length(cats), pruned: stats.aggs_pruned };
+	                 categories: length(cats), pruned: stats.aggs_pruned,
+	                 refused: stats.aggs_refused };
 	r.events = { total: stats.events, frames: stats.frames, malformed: stats.malformed,
 	             unknown: stats.unknown, unknown_types: stats.unknown_types,
 	             by_type: stats.by_type, rx_bytes: stats.rx_bytes, resyncs: stats.resyncs,
