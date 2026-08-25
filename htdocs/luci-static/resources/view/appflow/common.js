@@ -92,7 +92,12 @@ var CATEGORY_SLOT = {
 var NEUTRAL = 'hsl(0,0%,50%)',
     NEUTRAL_ROLLUP = 'hsl(0,0%,72%)';
 
-/* Netify category tags whose naive title-case reads badly. */
+/* Netify category tags. Every tag that CATEGORY_SLOT assigns a fixed legend
+ * slot to is listed here too: naive title-case ("Web", "Networking", ...)
+ * reads fine in English, but bypasses _() entirely, so it never gets
+ * translated for other languages. Routing every known tag through _() here
+ * keeps them all catchable by the po/ catalog regardless of how the English
+ * fallback happens to read. */
 var CATEGORY_LABELS = {
 	'cdn':                 _('CDN'),
 	'voip':                _('VoIP'),
@@ -105,7 +110,32 @@ var CATEGORY_LABELS = {
 	'streaming-media':     _('Streaming Media'),
 	'remote-desktop':      _('Remote Desktop'),
 	'media-provider':      _('Media Provider'),
-	'unclassified':        _('Unclassified')
+	'unclassified':        _('Unclassified'),
+	'web':                 _('Web'),
+	'networking':          _('Networking'),
+	'infrastructure':      _('Infrastructure'),
+	'messaging':           _('Messaging'),
+	'technology':          _('Technology'),
+	'shopping':            _('Shopping'),
+	'financial':           _('Financial'),
+	'business':            _('Business'),
+	'games':               _('Games'),
+	'hosting':             _('Hosting'),
+	'mail':                _('Mail'),
+	'advertiser':          _('Advertiser'),
+	'news':                _('News')
+};
+
+/* appflowd collapses unattributed traffic into three synthetic pseudo-devices
+ * (see device_name() in appflowd) and sends their display name pre-rendered
+ * in English, since the daemon has no notion of the browser's language. The
+ * daemon also sends the stable key behind that name, so the frontend can
+ * substitute a translated label for these three specific keys while still
+ * falling back to the daemon's name for every real device. */
+var DEVICE_LABELS = {
+	'router':    _('Router'),
+	'unknown':   _('Unknown'),
+	'multicast': _('Multicast / Broadcast')
 };
 
 /* Field-name aliases.
@@ -164,7 +194,7 @@ var CSS = '\
  border:1px solid var(--border-color-medium);color:var(--text-color-medium);\
  background:var(--background-color-low)}\
 .af-pill > i{width:7px;height:7px;border-radius:50%;background:var(--text-color-low)}\
-.af-pill.af-ok > i{background:var(--success-color-high)}\
+.af-pill.af-ok > i{background:var(--success-color-high,hsl(150,50%,36%))}\
 .af-pill.af-warn{color:var(--error-color-high);border-color:var(--error-color-high)}\
 .af-pill.af-warn > i{background:var(--error-color-high)}\
 .af-tile{display:inline-flex;align-items:center;justify-content:center;\
@@ -173,7 +203,7 @@ var CSS = '\
 .af-tile.af-tile-icon{font-size:0}\
 .af-tile-img{width:64%;height:64%;object-fit:contain;display:block}\
 .af-tile-img.af-mono{filter:brightness(0) invert(1)}\
-.af-app{display:flex;align-items:center;gap:.6em;min-width:0}\
+.af-app{display:flex;align-items:flex-start;gap:.6em;min-width:0}\
 .af-appname{min-width:0;overflow:hidden}\
 .af-applabel{display:block;overflow:hidden;text-overflow:ellipsis;\
  white-space:nowrap;line-height:16px}\
@@ -181,26 +211,26 @@ var CSS = '\
  background:var(--background-color-medium);overflow:hidden;\
  box-shadow:inset 0 0 0 1px var(--border-color-low)}\
 .af-bar > i{display:block;height:100%;transition:width .3s ease-out}\
-i.af-dl{background:var(--primary-color-high)}\
-i.af-ul{background:var(--success-color-high)}\
+i.af-dl{background:var(--primary-color-high,hsl(210,58%,46%))}\
+i.af-ul{background:var(--success-color-high,hsl(150,50%,36%))}\
 .af-kpi{display:flex;flex-wrap:wrap;gap:1.4em 2.4em;margin:0 0 1.1em}\
 .af-kpi-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.08em;\
  color:var(--text-color-medium);margin-bottom:.2em}\
 .af-kpi-val{font-size:21px;line-height:1.1;font-weight:600;\
  font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}\
-.af-kpi-val.af-dlc{color:var(--primary-color-high)}\
-.af-kpi-val.af-ulc{color:var(--success-color-high)}\
+.af-kpi-val.af-dlc{color:var(--primary-color-high,hsl(210,58%,46%))}\
+.af-kpi-val.af-ulc{color:var(--success-color-high,hsl(150,50%,36%))}\
 .af-plot{position:relative;padding-left:64px}\
 .af-plot > svg{display:block;width:100%;height:100%;overflow:visible}\
 .af-grid-line{stroke:var(--border-color-medium);stroke-width:1;opacity:.7}\
 .af-line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}\
-.af-line.af-dl{stroke:var(--primary-color-high)}\
-.af-line.af-ul{stroke:var(--success-color-high)}\
+.af-line.af-dl{stroke:var(--primary-color-high,hsl(210,58%,46%))}\
+.af-line.af-ul{stroke:var(--success-color-high,hsl(150,50%,36%))}\
 .af-area{stroke:none}\
-.af-area.af-dl{fill:var(--primary-color-high);fill-opacity:.16}\
-.af-area.af-ul{fill:var(--success-color-high);fill-opacity:.12}\
-rect.af-col.af-dl{fill:var(--primary-color-high)}\
-rect.af-col.af-ul{fill:var(--success-color-high)}\
+.af-area.af-dl{fill:var(--primary-color-high,hsl(210,58%,46%));fill-opacity:.16}\
+.af-area.af-ul{fill:var(--success-color-high,hsl(150,50%,36%));fill-opacity:.12}\
+rect.af-col.af-dl{fill:var(--primary-color-high,hsl(210,58%,46%))}\
+rect.af-col.af-ul{fill:var(--success-color-high,hsl(150,50%,36%))}\
 .af-yaxis{position:absolute;left:0;top:0;bottom:0;width:58px;pointer-events:none}\
 .af-ylbl{position:absolute;right:0;transform:translateY(-50%);font-size:10px;\
  color:var(--text-color-medium);font-variant-numeric:tabular-nums;white-space:nowrap}\
@@ -226,13 +256,13 @@ rect.af-col.af-ul{fill:var(--success-color-high)}\
  white-space:nowrap}\
 .af-legend-val{flex:0 0 auto;color:var(--text-color-medium);font-size:11px}\
 .af-table{margin-bottom:0}\
-.af-table .th,.af-table .td{padding:7px 10px}\
+.af-table .th,.af-table .td{text-align:left!important;padding:7px 10px}\
 .af-table .tr.af-row{cursor:pointer}\
 .af-table .tr.af-row:hover .td{background:var(--background-color-low)}\
 .af-table .tr.af-all .td{background:var(--background-color-medium);font-weight:600}\
 .af-table .th.af-num,.af-table .td.af-num{text-align:right}\
 .af-table .th.af-sortable{cursor:pointer;user-select:none;white-space:nowrap}\
-.af-table .th.af-sortable:hover{color:var(--primary-color-high)}\
+.af-table .th.af-sortable:hover{color:var(--primary-color-high,hsl(210,58%,46%))}\
 .af-caret{font-size:9px;margin-left:.3em;opacity:.6}\
 .af-placeholder{padding:1.7em 0;text-align:center;color:var(--text-color-medium);\
  font-size:12px}\
@@ -251,7 +281,8 @@ rect.af-col.af-ul{fill:var(--success-color-high)}\
 .af-modal-head{display:flex;align-items:center;gap:.75em;margin:0 0 1em}\
 .af-modal-head .af-tile{width:34px;height:34px;flex-basis:34px;font-size:15px;\
  border-radius:6px}\
-.af-modal-head h4{margin:0;font-size:16px;line-height:1.2}\
+.af-modal-head h4{margin:0;font-size:16px;line-height:1.2;text-align:left!important}\
+.af-modal-head > div{text-align:left!important}\
 .af-badge{display:inline-block;font-size:10px;letter-spacing:.03em;padding:.2em .55em;\
  border-radius:9px;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.25)}\
 .af-btnrow{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:.5em;margin-top:.8em}\
@@ -260,9 +291,9 @@ rect.af-col.af-ul{fill:var(--success-color-high)}\
  color:var(--text-color-medium);border:1px solid var(--border-color-high);\
  vertical-align:1px}\
 .modal h4{margin:1.1em 0 .5em;font-size:13px;text-transform:uppercase;\
- letter-spacing:.06em;color:var(--text-color-medium);border:none}\
+ letter-spacing:.06em;color:var(--text-color-medium);border:none;text-align:left!important}\
 .modal .af-modal-head h4{margin:0;font-size:16px;text-transform:none;letter-spacing:0;\
- color:var(--text-color-high)}\
+ color:var(--text-color-high);text-align:left!important}\
 ';
 
 /* --------------------------------------------------------------- exports */
@@ -376,12 +407,13 @@ return baseclass.extend({
 
 	normDevice: function(raw) {
 		var t = this.normTotals(raw),
+		    key = this.str(raw, A_KEY),
 		    mac = this.str(raw, A_MAC),
 		    ip = this.str(raw, A_IP);
 
 		t.mac = mac.toUpperCase();
 		t.ip = ip;
-		t.name = this.str(raw, A_DNAM, ip || mac || _('Unknown device'));
+		t.name = DEVICE_LABELS[key] || this.str(raw, A_DNAM, ip || mac || _('Unknown device'));
 		t.seen = this.num(raw, A_SEEN, 0);
 		t.isRouter = !!(raw && raw.is_router);
 

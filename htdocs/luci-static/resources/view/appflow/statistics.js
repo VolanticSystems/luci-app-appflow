@@ -402,7 +402,7 @@ return view.extend({
 			E('div', { 'class': 'af-modal-head' }, [
 				appflow.tile(app.label, app.cat, app.tag),
 				E('div', {}, [
-					E('h4', {}, [ app.label ]),
+					E('h4', { 'style': 'display:block;text-align:left;padding:0;margin:0' }, [ app.label ]),
 					app.cat ? E('span', {
 						'class': 'af-badge',
 						'style': 'background:' + appflow.color(app.cat)
