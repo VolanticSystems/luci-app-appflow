@@ -216,7 +216,8 @@ return view.extend({
 			return E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td' }, [ appflow.appCell(a) ]),
 				E('td', { 'class': 'td', 'style': 'width:26%' }, [
-					appflow.bar(a.rdl, a.rul, peak)
+					/* rates, not bytes: tell bar() which unit it is drawing */
+					appflow.bar(a.rdl, a.rul, peak, appflow.fmtRate)
 				]),
 				E('td', { 'class': 'td af-num' }, [ appflow.fmtRate(a.rdl) ]),
 				E('td', { 'class': 'td af-num' }, [ appflow.fmtRate(a.rul) ])
@@ -271,7 +272,20 @@ return view.extend({
 		var devs = list
 			.map(function(d) { return appflow.normDevice(d); })
 			.filter(function(d) { return d.total > 0 || d.rate > 0; })
-			.sort(function(a, b) { return (b.rate - a.rate) || (b.total - a.total); })
+			/* Cumulative bytes first, rate only as the tie-break. These were the
+			 * other way round until 2026-08-25, which disagreed with this card's
+			 * own caption ("top, by cumulative bytes") and with the bar beside
+			 * each row, which is scaled against max(total) below. A table
+			 * ordered by rate and drawn against a cumulative scale produces bars
+			 * that do not shorten down the column, directly under a Top
+			 * applications table that does -- both visible in one screenshot.
+			 *
+			 * It also chose the wrong rows: most devices sit at rate 0 at any
+			 * instant, so a phone doing a 2 KB/s keepalive outranked a TV that
+			 * pulled 12 GB an hour ago, and with enough devices trickling the TV
+			 * left the card entirely. Found by a security/first-look review of
+			 * this file, which had never been reviewed by anyone. */
+			.sort(function(a, b) { return (b.total - a.total) || (b.rate - a.rate); })
 			.slice(0, TOP_DEVICES);
 
 		if (!devs.length) {

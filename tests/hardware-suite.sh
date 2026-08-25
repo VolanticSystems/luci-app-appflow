@@ -271,6 +271,26 @@ test_acl() {
 	else
 		bad "write grants beyond appflow.reset: $W"
 	fi
+
+	# The grant list must not exceed what the frontend actually binds. Checking
+	# only for absent CATEGORIES missed this: the ACL granted `apps` and `flows`
+	# that no view calls, and `flows` is the live per-connection table rather
+	# than an aggregate. The code comment even said the two were deliberately
+	# unbound, so the evidence was sitting next to the defect.
+	V=/www/luci-static/resources/view/appflow/common.js
+	if [ -r "$V" ]; then
+		DECL=$(grep -oE "declare\('[a-z_]+'" "$V" | sed "s/declare('//;s/'//" | sort -u)
+		GRANT=$(sed -n '/"read"/,/"write"/p' "$A" | grep -oE '"[a-z_]+"' \
+		        | grep -vE '"read"|"write"|"ubus"|"appflow"' | tr -d '"' | sort -u)
+		EXTRA=$(for g in $GRANT; do echo "$DECL" | grep -qx "$g" || echo "$g"; done | tr '\n' ' ')
+		if [ -z "$(echo "$EXTRA" | tr -d ' ')" ]; then
+			ok "every granted read method is one the frontend declares"
+		else
+			bad "granted but never called by any view: $EXTRA"
+		fi
+	else
+		skip "frontend not installed; cannot compare grants against declares"
+	fi
 }
 
 # ---------------------------------------------------------------- run

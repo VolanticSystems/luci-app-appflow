@@ -434,6 +434,14 @@ return view.extend({
 		if (series.length)
 			body.push(appflow.columnChart(series, {
 				height: 150,
+				/* The axis is labelled -60 min, so it must span the daemon's full
+				 * trailing hour regardless of how many buckets have accumulated
+				 * so far. That hour is TWELVE five-minute buckets
+				 * (appflowd: SERIES_SLOTS=12, SERIES_MS=300000), not sixty --
+				 * passing 60 here would squeeze a complete hour into the last
+				 * fifth of the chart, which is a worse lie than the one this
+				 * fixes. If SERIES_SLOTS changes, this changes with it. */
+				slots: 12,
 				xlabels: [ _('-%d min').format(60), _('now') ]
 			}));
 		else
