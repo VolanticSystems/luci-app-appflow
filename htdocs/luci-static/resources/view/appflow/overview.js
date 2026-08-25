@@ -128,7 +128,22 @@ return view.extend({
 		var totals = appflow.normTotals(summary.totals || summary),
 		    rates = summary.rates ? appflow.normRates(summary.rates) : totals;
 
-		this.samples.push({ dl: rates.rdl, ul: rates.rul });
+		/* Stamped so a gap can be measured. The chart still places points by
+		 * INDEX, so the "-5 min" label remains an assumption that every sample
+		 * is INTERVAL apart -- that is a real limitation and is not fixed here.
+		 * What the stamp does fix is the recovery below: without it there was no
+		 * way to tell a 10-second blip from an hour offline, so showDown()
+		 * cleared unconditionally. */
+		var nowMs = Date.now(),
+		    last = this.samples.length ? this.samples[this.samples.length - 1].t : 0;
+
+		/* Coming back from a gap longer than the whole window: the old samples
+		 * would be drawn adjacent to the new ones and read as continuous, which
+		 * is a worse lie than an empty chart. Start over. */
+		if (last && (nowMs - last) > SLOTS * INTERVAL * 1000)
+			this.samples = [];
+
+		this.samples.push({ t: nowMs, dl: rates.rdl, ul: rates.rul });
 
 		while (this.samples.length > SLOTS)
 			this.samples.shift();
@@ -152,7 +167,13 @@ return view.extend({
 	},
 
 	showDown: function(err) {
-		this.samples = [];
+		/* Deliberately NOT clearing this.samples. showDown fires on the SECOND
+		 * consecutive miss, so roughly ten seconds of unavailability used to
+		 * destroy five minutes of history -- and appflowd is restarted by an
+		 * ordinary config change, so that was a hair trigger. paint() now drops
+		 * the buffer only when the gap exceeds the chart's own window, which is
+		 * the case where redrawing it really would mislead. Raised by a
+		 * code-review panel, 2026-08-25. */
 		dom.content(this.downNode, appflow.notRunning(appflow.classifyFail(err), err));
 		this.liveNode.style.display = 'none';
 		this.downNode.style.display = '';
