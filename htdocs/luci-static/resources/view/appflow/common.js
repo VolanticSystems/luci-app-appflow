@@ -371,13 +371,32 @@ return baseclass.extend({
 
 	/* A dedicated rate object may name its members download/upload rather than
 	 * rx_rate/tx_rate; fold both spellings into rdl/rul. */
+	/* A `rates` envelope may name its fields either way: rate_down/rx_rate, or
+	 * the byte-ish download/bytes_down, which inside a rates object still mean
+	 * a RATE. So a fallback between the two lists is intended.
+	 *
+	 * What is not intended is `t.rdl || t.dl`, which is what this used to be.
+	 * `||` cannot tell "the rate field is absent" from "the rate is legitimately
+	 * zero", so an idle link carrying rate_down: 0 alongside a cumulative
+	 * bytes_down fell through to the byte counter and the Download KPI read
+	 * something like "12.4 GB/s" while nothing moved. Read with a -1 sentinel
+	 * and test presence instead, the way normTotals already does for its own
+	 * totals. Raised by a code-review panel, 2026-08-25.
+	 *
+	 * Latent rather than live: the only caller is guarded by `summary.rates ?`,
+	 * and this daemon puts byte and rate counters together in `totals` and sends
+	 * no `rates` object at all. This is the forward-looking path the comment in
+	 * overview.js promises, so it should be correct before it is ever used. */
 	normRates: function(raw) {
-		var t = this.normTotals(raw);
+		var rdl = this.num(raw, A_RDL, -1),
+		    rul = this.num(raw, A_RUL, -1),
+		    rate = this.num(raw, A_RATE, -1),
+		    t = this.normTotals(raw);
 
 		return {
-			rdl: t.rdl || t.dl,
-			rul: t.rul || t.ul,
-			rate: t.rate || t.total
+			rdl: (rdl >= 0) ? rdl : t.dl,
+			rul: (rul >= 0) ? rul : t.ul,
+			rate: (rate >= 0) ? rate : t.total
 		};
 	},
 
