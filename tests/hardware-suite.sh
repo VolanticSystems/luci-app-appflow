@@ -16,6 +16,20 @@
 #
 # Exit status is the number of failed checks.
 #
+# WHAT THIS SUITE CAN AND CANNOT CATCH, established by running it against the
+# pre-fix v1.0.1 daemon on 2026-08-25, which is the only test of a test worth
+# anything:
+#
+#   caught:      an old daemon with no conservation counters at all
+#                (status.bytes missing), and any leak once they exist
+#   NOT caught:  the reshadow double-count itself. The restart ratio came back
+#                1.012 on the known-broken daemon, having been 0.70 and 0.79 on
+#                two runs the day before. See the note in test_restart.
+#
+# Unlike the wansentry suite, nothing here reimplements the code under test:
+# every check queries the running daemon over ubus. The weakness is coverage,
+# not construction.
+#
 # WIRE TRUTH. Where a test needs to know how many bytes really moved, it reads
 # the client veth's own counter in /sys/class/net. Nothing in appflowd can
 # influence that number, which is the entire point: comparing appflow against
@@ -204,6 +218,19 @@ test_restart() {
 	# reshadow() used to return early on dev_key == "router", which is exactly
 	# how a WAN-side capture of a NAT-ed client flow is classified, so after a
 	# restart both copies of a flow stayed counted for its whole remaining life.
+	#
+	# READ THIS BEFORE TRUSTING A GREEN RESULT HERE. This check is a broad
+	# regression guard, not a reliable detector of that defect. Measured against
+	# the pre-fix v1.0.1 daemon: 0.701 and 0.791 on two runs on 2026-08-24, then
+	# 1.012 on 2026-08-25 -- the same broken code passing, because whether the
+	# defect manifests depends on a NAT-ed flow actually spanning the restart
+	# and being captured on both interfaces, and a sixty-second window does not
+	# guarantee that.
+	#
+	# So: a RED result here is strong evidence of a real problem. A GREEN result
+	# is weak evidence of correctness, and one green run is not proof the
+	# attribution is sound. The conservation counters above are the dependable
+	# signal; this one catches gross breakage.
 	ubus call appflow reset >/dev/null 2>&1; sleep 2
 	local w0; w0=$(wire)
 
