@@ -62,10 +62,22 @@ talks to a DPI engine whose behaviour is version-specific, and several
 plausible-looking assumptions about netifyd have already turned out to be
 wrong when measured (documented in DESIGN 2.4 and 2.5).
 
-**Then run the suites, on a sandbox router and one at a time.**
+**Then run the suites.** The JavaScript one needs only Node and runs anywhere;
+the two shell suites need a sandbox router and must be run one at a time.
 
-    sh tests/protocol-suite.sh        # 54 checks, no traffic needed
-    sh tests/hardware-suite.sh        # 15 checks, needs real traffic
+    node tests/frontend-suite.js      # 31 checks, no router needed
+    sh   tests/protocol-suite.sh      # 54 checks, sandbox router, no traffic
+    sh   tests/hardware-suite.sh      # 15 checks, sandbox router, real traffic
+
+`frontend-suite.js` loads the REAL `common.js` under Node through
+`tests/luci-module.js`, a small `vm.Script` loader that supplies LuCI's
+runtime (`_()`, `E()`, `uci`) and nothing else. No logic from the product is
+copied into it. Every check in its first three groups is a regression test for
+a defect that was real, shipped and fixed: a status pill that read "connected"
+from a payload carrying no evidence either way, a colour lookup that a device
+named `constructor` could turn into `undefined`, and a normaliser that was not
+idempotent. All three were found by people reading the code, because until
+2026-08-27 no test could run any of it.
 
 `protocol-suite.sh` repoints `appflow.socket_path` at a socket it controls and
 feeds the real daemon a chosen event stream, so the byte arithmetic is checked
