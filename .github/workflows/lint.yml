@@ -247,3 +247,30 @@ jobs:
             --no-config-lookup \
             --config "${{ runner.temp }}/eslint.config.mjs" \
             "${files[@]}"
+
+  jsunit:
+    name: node (frontend units)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # These suites load the REAL LuCI view modules under Node and call their
+      # exported pure functions. No router, no browser, no network, no
+      # dependencies: the loader is tests/luci-module.js and it is a few dozen
+      # lines of vm.Script.
+      #
+      # They exist because every browser-side defect this package has had was
+      # found by a human reading the code. The daemon had a hardware suite and
+      # the JavaScript had nothing, which is backwards.
+      - name: Run the frontend suite
+        run: |
+          set -eu
+          test -f tests/frontend-suite.js || {
+            echo "::error::tests/frontend-suite.js is missing"
+            exit 1
+          }
+          node tests/frontend-suite.js
