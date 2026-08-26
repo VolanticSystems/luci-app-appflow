@@ -515,13 +515,22 @@ return view.extend({
 			}, [ _('Close') ])
 		]));
 
-		ui.showModal(_('Details'), body, 'cbi-modal');
+		/* Node array, not a bare string -- the same rule stated at the top of
+		 * handleDetail() and, until 2026-08-26, not followed here. LuCI routes a
+		 * bare-string title through innerHTML, and `_()` returns whatever the
+		 * active catalog says. With the English catalog that is a constant in
+		 * this file; the moment a translation is accepted it is third-party
+		 * content, which is exactly what the pending zh_Hans PR proposes. Raised
+		 * by a review panel over that PR, which was careful to note the submitted
+		 * Chinese contains no markup: this is closing the trust distinction, not
+		 * fixing an exploit. */
+		ui.showModal([ _('Details') ], body, 'cbi-modal');
 	},
 
 	/* -------------------------------------------------------------- clear */
 
 	handleClear: function() {
-		ui.showModal(_('Clear statistics'), [
+		ui.showModal([ _('Clear statistics') ], [
 			E('p', {}, [
 				_('This resets the per-application, per-device and per-category counters and time buckets. Live flow tracking continues uninterrupted, so the figures on this page simply start again from zero.')
 			]),
