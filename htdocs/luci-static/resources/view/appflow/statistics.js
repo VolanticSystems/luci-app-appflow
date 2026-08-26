@@ -8,10 +8,10 @@
 /*
  * AppFlow: Statistics (past hour).
  *
- * DESIGN.md §4 item 2: the GL-parity range view, served from the daemon's
+ * DESIGN.md §4 item 2: the range view, served from the daemon's
  * in-RAM 12 x 5-minute buckets via ubus appflow.stats {range:"hour"}. Layout,
  * column set, sort order, the synthetic "All traffic" row, the search box, the
- * per-app detail drawer and the 15 s poll all mirror GL 4.9.1's
+ * per-app detail drawer and the 15 s poll follow the conventions of the
  * "Flow Control -> Data Statistics" screen.
  *
  * Past day / past week are phase 2 (they need persistence). The tabs are shown

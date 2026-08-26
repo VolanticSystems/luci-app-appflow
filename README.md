@@ -78,6 +78,10 @@ left to be discovered. Details and supporting measurements are in
   accounting correct and stops attributing the router's own traffic, rather
   than double-counting; it logs one warning saying so. Check
   `ubus call appflow status` under `conntrack` to see which mode you are in.
+
+**If something looks wrong with the numbers**, run `ubus call appflow status`
+and look at `bytes.leaked`. It should read 0. If it doesn't, the daemon is
+seeing traffic it cannot account for and I would like to know about it.
 - **Late re-classification may leave early bytes under "Unknown".** If netifyd
   identifies a flow only after several packets, bytes counted before that point
   are not retroactively moved, because the accounting path is deliberately

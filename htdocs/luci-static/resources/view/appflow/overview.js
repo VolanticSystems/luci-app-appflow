@@ -7,7 +7,7 @@
 /*
  * AppFlow: Overview (live).
  *
- * DESIGN.md §4 item 1. This is the tab GL has no equivalent of: live total
+ * DESIGN.md §4 item 1. The live view: total
  * throughput, the applications currently moving traffic, the category split
  * and the busiest devices, refreshed every 5 s from ubus appflow.summary /
  * appflow.devices / appflow.status.
