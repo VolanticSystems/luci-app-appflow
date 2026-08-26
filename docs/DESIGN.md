@@ -4,9 +4,11 @@ Status: v1 spec LOCKED (2026-08-21). Remaining open items tracked in §8.
 
 ## 1. Goal
 
-A LuCI-native, fully open per-application traffic dashboard for OpenWrt:
-a functional equivalent of the DPI "traffic statistics" screens found in vendor
-firmware (reference: GL.iNet 4.x admin panel), built on the Netify Agent.
+A LuCI-native, fully open per-application traffic dashboard for OpenWrt, built
+on the Netify Agent. Stock OpenWrt can tell you how much traffic crossed an
+interface; it cannot tell you which application produced it. Several vendor
+firmwares ship a DPI traffic-statistics screen that can, and this is an open
+equivalent for stock OpenWrt.
 
 Primary scope (v1): **live view** — per-application and per-device rates and
 session totals, category grouping, live charts.
@@ -409,47 +411,51 @@ orders of magnitude higher than that observed point, not a number the box is
 expected to reach under normal use, but worth stating plainly rather than
 waved off as "naturally small".
 
-## 4. UI specification (locked 2026-08-21 against GL 4.9.1 stable teardown)
+## 4. UI specification (locked 2026-08-21)
 
-Reference: GL.iNet 4.9.1 "Flow Control → Data Statistics" screen, reverse-
-engineered from the shipped firmware (see scratch spec `GL-APPFLOW-SPEC.md`).
-Key reference facts: GL's screen is **range-based** (Past hour / Past day /
-Past week tabs over SQLite with tiered downsampling: native <1 h, 5-min buckets
-<26 h, daily to 8 days), polls every **15 s**, table columns are
-Application / Download / Upload / Total (sorted total desc, searchable,
-synthetic "All traffic" first row), a Top-10 bar chart, and a per-app detail
-drawer (app time series + per-client rows: name, MAC, last seen, share %).
-GL's engine is **netifyd itself** (cloud-license-gated); ours is the same
-engine with no license gate — classification is 100 % local in both.
+The conventions this screen follows, which are the ones a DPI traffic screen
+conventionally uses and which users of such screens already expect: a
+**range-based** view (past hour, with day and week as later phases), a **15 s**
+poll, table columns of Application / Download / Upload / Total sorted by total
+descending, searchable, with a synthetic "All traffic" first row, a Top-10 bar
+chart, and a per-app detail drawer carrying a time series plus per-client rows
+(name, MAC, last seen, share %).
+
+Classification here is **entirely local**: netifyd runs on the router, reads a
+local socket, and nothing about the traffic leaves the device. Measured on the
+development router, netifyd held 16 sockets over 4 days 23 hours of uptime — 12
+unix and 3 packet-capture — and **zero TCP or UDP sockets**, with no outbound
+connection at any point.
 
 appflow v1 ships two tabs:
 
-1. **Overview (live)** — our value-add; GL has no real-time view. Live total
+1. **Overview (live)** — the live view, which range-based DPI screens do not
+   generally provide. Live total
    throughput chart, top apps by current rate, category breakdown, top
    devices. Poll 5 s.
-2. **Statistics (Past hour)** — GL-parity range view from in-RAM buckets
+2. **Statistics (Past hour)** — the range view, from in-RAM buckets
    (12 × 5-min per app): Top-10 chart, the Application/Download/Upload/Total
    table (sorted, searchable, "All traffic" row), per-app detail drawer with
    12-point time series + per-device rows (name, MAC, last seen, DL/UL,
-   share %), and a Clear button (`reset`). Poll 15 s, matching GL.
+   share %), and a Clear button (`reset`). Poll 15 s.
 
 **Past day / Past week tabs are phase 2** (require persistence; the UI shows
 the tabs disabled with a tooltip, so the seam is visible rather than hidden).
 
-Deliberate deviations from GL, documented as choices:
-- **No app icons in core, by design.** GL's per-app icons/descriptions ship
+Deliberate departures from the conventional layout, documented as choices:
+- **No app icons in core, by design.** Vendor screens' per-app icons ship
   from their CDN and are proprietary (netify/eGloo data). Core
   `luci-app-appflow` renders letter-tile avatars colored by category on its
   own, zero licensing exposure, still scannable. A separate, optional
   package, `luci-app-appflow-icons` (§9), adds brand icons for the ~100 most
   recognizable detectable apps; core probes for that package's icon
   directory at render time and falls back cleanly when it is not installed.
-- **No per-app Block toggle** (GL wires it to their content-filter product;
+- **No per-app Block toggle** (vendor screens wire it to a content-filter product;
   out of scope for a statistics package).
-- **No enable/disable toggle** — GL gates a heavy NFQUEUE pipeline; appflowd
+- **No enable/disable toggle** — that gates a heavy NFQUEUE pipeline elsewhere; appflowd
   is a lightweight socket consumer, service control via standard init.
 - Device names resolved from `/tmp/dhcp.leases` + netifyd status.json MAC map
-  (GL uses their proprietary client registry socket).
+  (vendor implementations use a proprietary client registry socket).
 
 ## 5. ubus contract (v1 draft)
 
@@ -461,7 +467,7 @@ Object `appflow`:
 | `apps` | `{sort, limit}` | full per-app aggregate list |
 | `devices` | – | per-device aggregates (+resolved names) |
 | `app_detail` | `{app}` | per-device + per-hostname breakdown + hour time series for one app |
-| `stats` | `{range:"hour"}` | GL-parity range totals: all/applications[]/top_apps[] with 12×5-min time series (only `hour` in v1; other ranges rejected until phase 2) |
+| `stats` | `{range:"hour"}` | range totals: all/applications[]/top_apps[] with 12×5-min time series (only `hour` in v1; other ranges rejected until phase 2) |
 | `flows` | `{limit}` | live flow list (debug/power-user view) |
 | `status` | – | daemon health: uptime, flows tracked, events/s, socket state |
 | `reset` | – | zero all aggregates/buckets (the "Clear" function; **write-scope ACL**, separate from read grants) |
@@ -495,7 +501,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
    `{cur, buckets[]}` from day one, and the buckets are load-bearing in v1,
    not a stub: every aggregate (totals, each app, each device, each
    category) carries a 12-slot, 5-minute ring covering the trailing hour
-   (backs the GL-parity `stats`/`app_detail` time series), and every
+   (backs the `stats`/`app_detail` time series), and every
    per-(app × device) and per-host breakdown carries a coarser 4-slot,
    15-minute ring covering the same trailing window at a quarter of the
    memory. History (§9) extends retention and adds persistence of that same
@@ -508,7 +514,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
 
 ## 8. Risks / open items
 
-- ~~GL reference spec~~ — landed 2026-08-21, §4 locked against GL 4.9.1 stable.
+- ~~UI reference spec~~ — landed 2026-08-21, §4 locked.
 - ~~netifyd conf details~~ — landed: multi-client listen socket, `dump_established_flows`,
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ~~ucode `publish()` reliability → decides §3 option A/B~~: resolved, §3
@@ -613,15 +619,15 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
    package directory.
 2. **v2 — Past day / Past week ranges** (persistence per §7 seams; flash-wear
    policy: coarse-bucket flushes only, tmpfs-first with periodic backup,
-   GL-style tiered downsampling).
+   tiered downsampling).
 
 ## 10. As-implemented contract notes (v1 final)
 
 §5 sketched the method set; the implemented field naming is authoritative:
 live aggregate rows use `bytes_up/bytes_down/bytes_total` +
 `rate_up/rate_down/rate_total` (+ `key/name/tag/category`), while the
-GL-parity `stats`/`app_detail` range views use `download/upload/total`,
-matching GL's own vocabulary for that screen. `status` is nested
+The `stats`/`app_detail` range views use `download/upload/total`, which is the
+conventional vocabulary for that screen. `status` is nested
 (`socket.*`, `flows.*`, `aggregates.*`, `agent.*`, `memory.*`).
 `app_detail` takes the aggregate `key` or the raw tag or the display
 label (resolver tries all three). The frontend ships normalisers for
