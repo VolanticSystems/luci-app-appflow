@@ -42,8 +42,16 @@ off:
     dump_established_flows = yes
     enable_sink = no
 
-Check that line on your own install rather than trusting this one, since it is
-netifyd's setting and not appflow's, and anyone can change it.
+`enable_sink = no` is the line that matters. Check it on your own install
+rather than trusting this one: it is netifyd's setting, not appflow's, and
+anyone can change it.
+
+The line above it is quoted only because it is really there. **It does
+nothing on 4.4.7**: the string `dump_established_flows` does not appear in the
+shipped binary at all, while `enable_sink` does. It is a stale key in the
+packaged config, and if you were hoping it means the agent will replay
+established flows to a client that connects late, it does not. That is the
+cause of the "Unknown" limitation below, not something a setting can turn off.
 
 ## How it compares
 
@@ -140,6 +148,21 @@ Three fields there answer most questions:
 `flows.shed` is counted separately from `flows.pruned`, which is ordinary
 housekeeping of idle flows and is expected to be large. Reading them as one
 number hides cap pressure underneath normal behaviour.
+
+## Tests
+
+Three suites, 100 checks, no failures. Two need a sandbox router; one needs
+nothing but Node and runs on every push.
+
+| suite | checks | what it does |
+|---|---|---|
+| `tests/frontend-suite.js` | 31 | loads the real view code under Node. Mostly regression tests for defects that shipped. |
+| `tests/protocol-suite.sh` | 54 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
+| `tests/hardware-suite.sh` | 15 | drives real traffic and compares against the client interface's own counter in `/sys/class/net`, which nothing in this daemon can influence. |
+
+Every check carries a comment naming the edit to the *product* that turns it
+red, written before the assertion. Details in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Requirements
 
