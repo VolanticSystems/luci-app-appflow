@@ -150,6 +150,15 @@ then:
 
     apk add --allow-untrusted /tmp/luci-app-appflow-icons-[0-9]*.apk
 
+## A sibling package
+
+[`luci-app-wansentry`](https://github.com/VolanticSystems/luci-app-wansentry)
+generates a two-uplink mwan3 failover configuration from one page, for people
+who want a second WAN to take over automatically without assembling six mwan3
+sections by hand. Same author, same OpenWrt release, and it solves a problem
+next to this one rather than the same one: appflow tells you what your traffic
+is, wansentry keeps it moving when a line drops. Neither depends on the other.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE). The icon pack is a separate package with
