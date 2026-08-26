@@ -62,6 +62,31 @@ talks to a DPI engine whose behaviour is version-specific, and several
 plausible-looking assumptions about netifyd have already turned out to be
 wrong when measured (documented in DESIGN 2.4 and 2.5).
 
+**Then run the suites, on a sandbox router and one at a time.**
+
+    sh tests/protocol-suite.sh        # 54 checks, no traffic needed
+    sh tests/hardware-suite.sh        # 15 checks, needs real traffic
+
+`protocol-suite.sh` repoints `appflow.socket_path` at a socket it controls and
+feeds the real daemon a chosen event stream, so the byte arithmetic is checked
+against hand-computed totals rather than a tolerance band, and the error paths
+a real agent never produces get exercised. `hardware-suite.sh` drives real
+traffic and compares against the client interface's own counter in
+`/sys/class/net`, which nothing in this daemon can influence. Neither replaces
+the other.
+
+Both restore what they change on exit, including on interrupt and on a dropped
+SSH session, and both take an exclusive lock: they mutate global router state
+and running two at once corrupts each other's fixtures.
+
+**If you add a check, write the sabotage first.** Every check in these files
+carries a `SABOTAGE:` comment naming the smallest edit to the *product* that
+turns it red, and the comment was written before the assertion. That ordering
+is the point: "what does this test check" answers itself in the author's own
+words, which is how a test that cannot fail gets written and then read a dozen
+times without anyone noticing. If you cannot construct a red state, you have
+found something more interesting than a test.
+
 ## Code style
 
 Match the surrounding code. Specifically:
@@ -87,6 +112,47 @@ colon, matching OpenWrt convention:
 If you would like the change to be portable upstream to `openwrt/luci` later,
 add a `Signed-off-by:` line with your real name, which is what upstream's DCO
 requires.
+
+## Translations
+
+The string catalogue lives in `po/templates/appflow.pot`. It is generated from
+the source, not written by hand: every `_('...')` call in
+`htdocs/luci-static/resources/view/appflow/*.js`, plus the `title` and
+`description` values in `root/usr/share/luci/menu.d/*.json` and
+`root/usr/share/rpcd/acl.d/*.json`. That file selection and those keywords are
+LuCI's, from `build/i18n-scan.pl` in the `openwrt/luci` tree.
+
+To add a language, create `po/<lang>/appflow.po` from the template and
+translate the `msgstr` lines. **Nothing in `Makefile` needs to change.**
+`luci.mk` discovers languages by globbing `po/*`:
+
+```make
+LUCI_LANGUAGES := $(sort $(filter-out templates,$(notdir $(wildcard ${CURDIR}/po/*))))
+```
+
+and generates a `luci-i18n-appflow-<lang>` package for each one, so a new
+directory is the whole of the work. The one-package-per-language split is
+deliberate upstream policy, not an oversight: a router with 8 MB of flash
+should not carry forty translations to use one. A combined "all languages"
+package [was proposed and
+rejected](https://github.com/openwrt/luci/issues/4075), because translations
+depend on applications rather than the reverse and no package metadata can
+express that.
+
+Two things worth knowing before you start:
+
+- **Keep the `%s` and `%d` specifiers, in a working order.** Several strings
+  interpolate values, and a catalogue that reorders or drops one produces a
+  broken sentence at best.
+- **Category names are not in the template, and that is not a bug.** They
+  arrive at runtime from netifyd's own `netify-categories.json`, so they exist
+  in neither the JavaScript nor the daemon as literals and no scanner can find
+  them. Translating them needs a source-side change first; open an issue rather
+  than adding orphan `msgid` entries, which the next regeneration would delete.
+
+If this package is ever accepted into `openwrt/luci`, translations arrive
+through [Hosted Weblate](https://hosted.weblate.org/projects/openwrt/) instead
+and this section stops being the interesting path.
 
 ## Where help is most useful
 

@@ -411,7 +411,29 @@ orders of magnitude higher than that observed point, not a number the box is
 expected to reach under normal use, but worth stating plainly rather than
 waved off as "naturally small".
 
-## 4. UI specification (locked 2026-08-21)
+**Every bound must be VISIBLE when it binds, and two of the three were not.**
+A table that silently stops accepting data reports the same status as a table
+with nothing to accept, which is the worst reading an operator can be given:
+the dashboard looks healthy at exactly the moment it has become incomplete.
+
+| bound | counter | added |
+|---|---|---|
+| aggregate table full of live entries | `aggregates.refused` | 2026-08-25 |
+| flow table at `flow_max` | `flows.shed` | 2026-08-26 |
+| unknown event-type map | (bounded at 16, not counted) | |
+
+`flows.shed` counts evictions caused by **cap pressure**, separately from
+`flows.pruned`, which is ordinary idle housekeeping and is expected to be
+large. They shared one counter until 2026-08-26, so cap pressure was invisible
+underneath normal behaviour.
+
+**`flows.dropped` is a genuine last-resort backstop and reads 0 in practice.**
+`flow_new()` increments it only if the table is still full *after*
+`prune(now, true)`, and that prune unconditionally sheds `int(flow_max/10) + 1`
+entries, so it always frees space and the fall-through does not occur.
+Measured by `tests/protocol-suite.sh`: 200 distinct digests against
+`flow_max=64` gave `tracked=60 pruned=143 shed=143 dropped=0`. It is kept
+because the guard is correct and cheap; it is not the number to watch.
 
 The conventions this screen follows, which are the ones a DPI traffic screen
 conventionally uses and which users of such screens already expect: a

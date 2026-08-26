@@ -128,12 +128,18 @@ protocol overhead being counted, but it has not been reconciled packet by
 packet, so treat these totals as a close upper bound rather than an exact
 byte count.
 
-**If something looks wrong with the numbers**, run `ubus call appflow status`
-and look at `bytes.leaked`. It should read 0. If it doesn't, the daemon is
-seeing traffic it cannot account for and I would like to know about it. The
-same output carries `aggregates.refused`, which is non-zero only if the
-per-class tables filled with live entries and new devices stopped being
-tracked.
+**If something looks wrong with the numbers**, run `ubus call appflow status`.
+Three fields there answer most questions:
+
+| field | what a non-zero value means |
+|---|---|
+| `bytes.leaked` | **Should read 0.** Traffic was reported by the agent and never reached an aggregate. If this moves, please tell me. |
+| `aggregates.refused` | A per-class table filled with live entries, so new applications or devices stopped being tracked. The dashboard is incomplete. Nothing is being mis-counted; the totals stay correct. |
+| `flows.shed` | The flow table hit `flow_max` and the least recently active flows were evicted to make room. Raise `flow_max` if this climbs steadily. |
+
+`flows.shed` is counted separately from `flows.pruned`, which is ordinary
+housekeeping of idle flows and is expected to be large. Reading them as one
+number hides cap pressure underneath normal behaviour.
 
 ## Requirements
 
