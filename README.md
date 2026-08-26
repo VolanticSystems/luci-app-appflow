@@ -28,11 +28,43 @@ netifyd 4.4.7 event contract as observed on real hardware, are in
 [docs/DESIGN.md](docs/DESIGN.md).
 
 `appflow` itself contacts no network service: it reads a local socket and
-publishes over ubus, with no account, key or registration of any kind. It does
-not speak for `netifyd`, which is a separate package with its own configuration
-and its own vendor-supplied application signature data. If you need to know
-whether netifyd reaches the network on your install, check netifyd's own
-configuration rather than taking this README's word for it.
+publishes over ubus, with no account, key or registration of any kind.
+
+`netifyd` is a separate package with its own configuration and its own
+vendor-supplied signature data, so appflow cannot speak for it. It was measured
+rather than assumed. On the development router, after 4 days 23 hours of
+uptime, netifyd held 16 sockets: 12 unix and 3 packet capture, and **zero TCP
+or UDP sockets**, with no outbound connection at any point. The agent does have
+a telemetry sink, and OpenWrt's packaged `/etc/netifyd.conf` ships it turned
+off:
+
+    [netifyd]
+    dump_established_flows = yes
+    enable_sink = no
+
+Check that line on your own install rather than trusting this one, since it is
+netifyd's setting and not appflow's, and anyone can change it.
+
+## How it compares
+
+`nlbwmon` is the usual answer to "what is using my bandwidth" on OpenWrt, and
+it is the first thing worth checking before installing this.
+
+| | `nlbwmon` | `appflow` |
+|---|---|---|
+| Axis | Per host, per protocol and port | Per application, per host |
+| How it identifies traffic | Conntrack accounting | DPI, via netifyd |
+| Storage | Persistent database, survives reboot | In memory only, live view, keeps nothing |
+| Range | Days and months | Live, plus past hour |
+| Cost | Under 1 MB VSZ for the daemon | netifyd, around 17 MB VSZ, plus about 2 MB for appflowd |
+
+They answer different questions, and both were run on the same router at the
+same time on identical traffic to check they can be: nlbwmon reported HTTP
+9.99 MB and HTTPS 2.09 MB; appflow reported the same traffic as cloudflare,
+github and wikipedia. Neither interfered with the other. If you want durable
+per-host accounting, nlbwmon does it better and appflow does not attempt it;
+if you want to know which *application* is doing it right now, that is the
+question this package exists to answer.
 
 ## Screenshots
 
@@ -78,10 +110,6 @@ left to be discovered. Details and supporting measurements are in
   accounting correct and stops attributing the router's own traffic, rather
   than double-counting; it logs one warning saying so. Check
   `ubus call appflow status` under `conntrack` to see which mode you are in.
-
-**If something looks wrong with the numbers**, run `ubus call appflow status`
-and look at `bytes.leaked`. It should read 0. If it doesn't, the daemon is
-seeing traffic it cannot account for and I would like to know about it.
 - **Late re-classification may leave early bytes under "Unknown".** If netifyd
   identifies a flow only after several packets, bytes counted before that point
   are not retroactively moved, because the accounting path is deliberately
@@ -99,6 +127,13 @@ flows of 1 KB were all accounted). The roughly 2% excess is consistent with
 protocol overhead being counted, but it has not been reconciled packet by
 packet, so treat these totals as a close upper bound rather than an exact
 byte count.
+
+**If something looks wrong with the numbers**, run `ubus call appflow status`
+and look at `bytes.leaked`. It should read 0. If it doesn't, the daemon is
+seeing traffic it cannot account for and I would like to know about it. The
+same output carries `aggregates.refused`, which is non-zero only if the
+per-class tables filled with live entries and new devices stopped being
+tracked.
 
 ## Requirements
 
