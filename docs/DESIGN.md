@@ -508,8 +508,17 @@ luci-app-appflow/
 ├── root/usr/sbin/appflowd            # ucode daemon (shebang /usr/bin/ucode)
 ├── root/usr/share/rpcd/acl.d/luci-app-appflow.json
 ├── root/usr/share/luci/menu.d/luci-app-appflow.json
+├── po/templates/appflow.pot          # string catalogue, GENERATED from source
+├── tests/protocol-suite.sh           # 54 checks, fake agent, no traffic needed
+├── tests/hardware-suite.sh           # 15 checks, real traffic vs wire truth
+├── tests/frontend-suite.js           # 31 checks, Node, runs in CI
+├── tests/luci-module.js              # loads a real LuCI view module under Node
 └── docs/DESIGN.md                    # this file
 ```
+
+`po/` is not hand-maintained. `luci.mk` discovers languages by globbing `po/*`
+and generates a `luci-i18n-appflow-<lang>` subpackage per directory, so adding
+a translation needs no Makefile change. See CONTRIBUTING.md.
 
 Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
 `ucode-mod-socket`, `ucode-mod-uloop`, `ucode-mod-ubus`, `ucode-mod-uci`,

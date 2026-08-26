@@ -11,9 +11,13 @@ Useful reports include:
   (`apk info netifyd` or `opkg info netifyd`).
 - What the dashboard showed versus what you expected.
 - `logread -e appflowd` output covering the period.
-- `ubus call appflow status`, which reports the daemon's own flow counters
-  (`seen`, `late`, `dropped`, `purged`, `no_total`). Those five numbers
+- `ubus call appflow status`, which reports the daemon's own counters. The
+  useful ones are `flows.seen`, `flows.late`, `flows.shed`, `flows.purged`,
+  `flows.no_total`, `bytes.leaked` and `aggregates.refused`; between them they
   distinguish most classes of problem immediately.
+  **Do not read `flows.dropped`**: it is a last-resort backstop that no input
+  can move, because the cap-pressure prune always frees space before it is
+  reached. `flows.shed` is the counter that says the flow table is too small.
 
 If the complaint is about *where bytes were attributed*, read
 [docs/DESIGN.md](docs/DESIGN.md) 2.5 first. Some attribution behaviour is
