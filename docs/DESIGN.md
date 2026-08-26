@@ -351,7 +351,13 @@ purge:
 | 2 | 10,478,155 | 20,639,013 | 196% |
 | 3 | 10,478,879 | 20,877,799 | 199% |
 
-**Fix direction, not yet implemented.** The `!dev_is_router` term exists for a
+> **The rest of this subsection is HISTORICAL and describes the state before
+> the fix above. It is kept because the reasoning is what led to the fix, but
+> nothing below is an open problem.** A review panel reading this document cold
+> reported it as a live double-count, having entered mid-section — so if you are
+> skimming, stop here and go to §3.3.
+
+**Fix direction, at the time this was written, since implemented.** The `!dev_is_router` term exists for a
 real reason: traffic the router genuinely originates belongs under `router` and
 must not be shadowed. So it cannot simply be dropped. What is needed is a way
 to tell a router-originated flow from a NAT'd client's twin, both of which
