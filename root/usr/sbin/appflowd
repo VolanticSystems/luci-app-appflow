@@ -124,6 +124,23 @@ let stats = {
 	events: 0, frames: 0, malformed: 0, unknown: 0, unknown_types: {},
 	by_type: {}, reconnects: 0, connect_fail: 0, purges: 0,
 	flows_seen: 0, flows_late: 0, flows_pruned: 0, flows_dropped: 0,
+	// Flows evicted because the table was AT ITS CAP, as opposed to evicted for
+	// going idle.  The two used to share flows_pruned, where cap pressure was
+	// invisible underneath ordinary housekeeping.
+	//
+	// This exists because flows_dropped, which reads like the counter for
+	// "flows we could not keep", CANNOT BE MOVED BY ANY INPUT.  flow_new()
+	// increments it only if the table is still full after prune(now, true), and
+	// that prune unconditionally sheds int(flow_max/10)+1 entries, so it always
+	// frees space and the fall-through never happens.  Measured 2026-08-26 by
+	// tests/protocol-suite.sh: 200 distinct digests against flow_max=64 gave
+	// tracked=60 pruned=143 dropped=0.  An operator reading `dropped: 0`
+	// concluded nothing was being lost while flows were being shed constantly.
+	// Same shape as aggs_refused below, and found the same way.
+	//
+	// flows_dropped is kept as the genuine last-resort backstop it always was.
+	// flows_shed is the number an operator should actually watch.
+	flows_shed: 0,
 	shadowed: 0, aggs_pruned: 0, rx_bytes: 0, resyncs: 0, sweeps: 0,
 	// Times an aggregate table was full of LIVE entries and a new key was
 	// therefore not tracked at all.  Distinct from aggs_pruned, which counts
@@ -1528,6 +1545,10 @@ prune = function(now, force) {
 	}
 
 	// Cap pressure: shed the least recently active tenth of the table.
+	//
+	// Counted separately into flows_shed as well as into the pruned total, so
+	// "the flow table is too small for this network" is visible instead of
+	// hiding under ordinary idle housekeeping.  See the note beside flows_shed.
 	if (force && nflows >= cfg.flow_max) {
 		let list = [];
 		for (let d in flows)
@@ -1537,6 +1558,7 @@ prune = function(now, force) {
 		for (let i = 0; i < want && i < length(list); i++) {
 			flow_drop(list[i][0]);
 			dropped++;
+			stats.flows_shed++;
 		}
 	}
 
@@ -1892,7 +1914,8 @@ function m_status(req) {
 	r.config = { flow_max: cfg.flow_max, rate_window: cfg.rate_window,
 	             top_n: cfg.top_n, idle_timeout: cfg.idle_timeout };
 	r.flows = { tracked: nflows, seen: stats.flows_seen, late: stats.flows_late,
-	            pruned: stats.flows_pruned, dropped: stats.flows_dropped,
+	            pruned: stats.flows_pruned, shed: stats.flows_shed,
+	            dropped: stats.flows_dropped,
 	            shadowed: stats.shadowed, purged: stats.purges,
 	            no_total: stats.no_total };
 	// NAT twin resolution (3.2).  `available` false means conntrack could not
