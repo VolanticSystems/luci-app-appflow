@@ -1,4 +1,4 @@
-# appflow — Design
+# appflow: Design
 
 Status: v1 spec LOCKED (2026-08-21). Remaining open items tracked in §8.
 
@@ -10,7 +10,7 @@ interface; it cannot tell you which application produced it. Several vendor
 firmwares ship a DPI traffic-statistics screen that can, and this is an open
 equivalent for stock OpenWrt.
 
-Primary scope (v1): **live view** — per-application and per-device rates and
+Primary scope (v1): **live view**, per-application and per-device rates and
 session totals, category grouping, live charts.
 Explicit non-goal for v1, but designed-for: **historical accounting** (see §7).
 
@@ -23,14 +23,14 @@ arch `arm_cortex-a15_neon-vfpv4`. All facts below observed live, not assumed.
 
 - netifyd **listens** on `unix:/var/run/netifyd/netifyd.sock`
   (`[socket] listen_path[0]`, enabled by default in the OpenWrt package).
-- ucode connects with plain `socket.connect(path)` — verified.
+- ucode connects with plain `socket.connect(path)`, verified.
 - **Wire framing**: newline-delimited JSON where each payload line is preceded
   by a header line `{"length": N}`. Parser rule: parse each line; a lone
   `length` key = frame header (skip); anything else dispatches on `type`.
 - Event types observed: `agent_hello`, `definitions`, `agent_status` (15 s
   cadence), `flow`, `flow_stats`.
 - `/var/run/netifyd/status.json` contains **agent status only** (plus a useful
-  MAC→IP `devices` map) — no flow data. The socket is the only flow source.
+  MAC→IP `devices` map), no flow data. The socket is the only flow source.
 
 ### 2.2 Event schemas (as observed)
 
@@ -80,7 +80,7 @@ accounting `local_bytes`/`other_bytes` from the purge event itself.
 - `definitions` event carries id→tag maps: 416 applications, 217 protocols.
   Applications and protocols are SEPARATE id spaces that can collide numerically
   (id 206 is both `WireGuard` the protocol and `netify.cloudflare` the app), and
-  legacy netify apps exist below 10000 (netflix=133) — the `netify.` tag prefix,
+  legacy netify apps exist below 10000 (netflix=133), the `netify.` tag prefix,
   not the id range, is the discriminator. Details: docs/netifyd-4.4.7-interface.md.
 - Category **names** live in `/etc/netify.d/netify-categories.json`:
   `application_tag_index` (32 tags: `streaming-media`, `social-media`, `games`,
@@ -106,11 +106,11 @@ accounting `local_bytes`/`other_bytes` from the purge event itself.
   tolerates `flow_stats` for unknown digests (stub "Unknown" entry). **Corrected
   2026-08-22:** that stub is backfilled only when a `flow` event actually follows,
   which happens for a genuine stats-before-flow race but NOT for a flow that was
-  already established at connect time — netifyd never emits a `flow` event for
+  already established at connect time, netifyd never emits a `flow` event for
   those, so they stay Unknown for their remaining lifetime. Measured in §2.5.
 - App detections are `netify.<slug>` strings; protocol names are plain.
 - OpenWrt ships netifyd **4.4.7** while upstream is v5.x with a different
-  plugin architecture — all behavior here is pinned to 4.4.7-as-packaged.
+  plugin architecture, all behavior here is pinned to 4.4.7-as-packaged.
 - netifyd bundles its own nDPI statically: `libndpi` is NOT a dependency.
 
 ### 2.5 Byte-attribution behaviour (measured 2026-08-22)
@@ -213,10 +213,10 @@ Two implementation options for the ubus surface:
 
 - **A (preferred): appflowd registers a ubus object directly** via
   `ucode-mod-ubus` (`conn.publish()`); rpcd ACL still governs LuCI access.
-- **B (fallback): snapshot file** — appflowd atomically writes
+- **B (fallback): snapshot file**, appflowd atomically writes
   `/var/run/appflow/state.json`; a stateless rpcd-ucode plugin serves reads.
 
-**DECIDED: Option A shipped** — `publish()` proven reliable on 25.12 (typed args,
+**DECIDED: Option A shipped**, `publish()` proven reliable on 25.12 (typed args,
 status returns, int64 all verified on-device). Option B text retained above only as design rationale.
 
 ### 3.1 Why a persistent daemon (not an on-demand reader)
@@ -356,7 +356,7 @@ purge:
 > **The rest of this subsection is HISTORICAL and describes the state before
 > the fix above. It is kept because the reasoning is what led to the fix, but
 > nothing below is an open problem.** A review panel reading this document cold
-> reported it as a live double-count, having entered mid-section — so if you are
+> reported it as a live double-count, having entered mid-section, so if you are
 > skimming, stop here and go to §3.3.
 
 **Fix direction, at the time this was written, since implemented.** The `!dev_is_router` term exists for a
@@ -445,17 +445,17 @@ chart, and a per-app detail drawer carrying a time series plus per-client rows
 
 Classification here is **entirely local**: netifyd runs on the router, reads a
 local socket, and nothing about the traffic leaves the device. Measured on the
-development router, netifyd held 16 sockets over 4 days 23 hours of uptime — 12
-unix and 3 packet-capture — and **zero TCP or UDP sockets**, with no outbound
+development router, netifyd held 16 sockets over 4 days 23 hours of uptime, 12
+unix and 3 packet-capture, and **zero TCP or UDP sockets**, with no outbound
 connection at any point.
 
 appflow v1 ships two tabs:
 
-1. **Overview (live)** — the live view, which range-based DPI screens do not
+1. **Overview (live)**, the live view, which range-based DPI screens do not
    generally provide. Live total
    throughput chart, top apps by current rate, category breakdown, top
    devices. Poll 5 s.
-2. **Statistics (Past hour)** — the range view, from in-RAM buckets
+2. **Statistics (Past hour)**, the range view, from in-RAM buckets
    (12 × 5-min per app): Top-10 chart, the Application/Download/Upload/Total
    table (sorted, searchable, "All traffic" row), per-app detail drawer with
    12-point time series + per-device rows (name, MAC, last seen, DL/UL,
@@ -474,7 +474,7 @@ Deliberate departures from the conventional layout, documented as choices:
   directory at render time and falls back cleanly when it is not installed.
 - **No per-app Block toggle** (vendor screens wire it to a content-filter product;
   out of scope for a statistics package).
-- **No enable/disable toggle** — that gates a heavy NFQUEUE pipeline elsewhere; appflowd
+- **No enable/disable toggle**, that gates a heavy NFQUEUE pipeline elsewhere; appflowd
   is a lightweight socket consumer, service control via standard init.
 - Device names resolved from `/tmp/dhcp.leases` + netifyd status.json MAC map
   (vendor implementations use a proprietary client registry socket).
@@ -485,14 +485,14 @@ Object `appflow`:
 
 | method | args | returns |
 |---|---|---|
-| `summary` | – | totals, rates, top_apps[], top_categories[], top_devices[], window meta |
+| `summary` | - | totals, rates, top_apps[], top_categories[], top_devices[], window meta |
 | `apps` | `{sort, limit}` | full per-app aggregate list |
-| `devices` | – | per-device aggregates (+resolved names) |
+| `devices` | - | per-device aggregates (+resolved names) |
 | `app_detail` | `{app}` | per-device + per-hostname breakdown + hour time series for one app |
 | `stats` | `{range:"hour"}` | range totals: all/applications[]/top_apps[] with 12×5-min time series (only `hour` in v1; other ranges rejected until phase 2) |
 | `flows` | `{limit}` | live flow list (debug/power-user view) |
-| `status` | – | daemon health: uptime, flows tracked, events/s, socket state |
-| `reset` | – | zero all aggregates/buckets (the "Clear" function; **write-scope ACL**, separate from read grants) |
+| `status` | - | daemon health: uptime, flows tracked, events/s, socket state |
+| `reset` | - | zero all aggregates/buckets (the "Clear" function; **write-scope ACL**, separate from read grants) |
 
 All byte values in **bytes**, rates in **bytes/sec** (UI formats). Timestamps
 ms epoch. Every response carries `generated_at` + `agent_connected`.
@@ -527,7 +527,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
 ## 7. History extension seams (deliberate, v1 ships them dormant)
 
 1. **Single aggregation choke point**: every counter delta flows through one
-   `account(flow, delta_bytes, ts)` function — the only place history taps in.
+   `account(flow, delta_bytes, ts)` function, the only place history taps in.
 2. **Time-bucketed accumulators**: aggregates are structured as
    `{cur, buckets[]}` from day one, and the buckets are load-bearing in v1,
    not a stub: every aggregate (totals, each app, each device, each
@@ -545,12 +545,12 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
 
 ## 8. Risks / open items
 
-- ~~UI reference spec~~ — landed 2026-08-21, §4 locked.
-- ~~netifyd conf details~~ — landed: multi-client listen socket, `dump_established_flows`,
+- ~~UI reference spec~~, landed 2026-08-21, §4 locked.
+- ~~netifyd conf details~~, landed: multi-client listen socket, `dump_established_flows`,
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ~~ucode `publish()` reliability → decides §3 option A/B~~: resolved, §3
   states Option A shipped, proven reliable on 25.12.
-- ~~Dual-capture dedup double-counts NAT'd client traffic~~ — FIXED 2026-08-24
+- ~~Dual-capture dedup double-counts NAT'd client traffic~~, FIXED 2026-08-24
   (§3.2) by resolving the ambiguity through conntrack rather than guessing.
   Client 99.8% and router 97.9% of wire truth, each counted once. Degrades
   safely when conntrack is unreadable. Original defect description follows.
@@ -563,7 +563,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
   wrong. No fix yet: `!dev_is_router` protects genuinely router-originated
   traffic and cannot simply be removed, and `ip_nat` is not a reliable
   discriminator. See §3.2 for the fix direction.
-- ~~**CT_MAX described as a memory bound**~~ — FIXED 2026-08-24, also from the
+- ~~**CT_MAX described as a memory bound**~~, FIXED 2026-08-24, also from the
   panel. `ct_load()` called `fs.readfile()` and then `split(raw, "
 ")`, which
   materialised the whole conntrack table and the whole line array *before*
@@ -591,7 +591,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
 - EA8500 resource baseline MEASURED (2026-08-21, light load, 12 flows,
   synthetic traffic): netifyd ~16.5 MB VSZ, ~0% CPU, box 95% idle, 397 MB
   free. Heavy-load measurement (real client routed through) still pending.
-- ~~Byte conservation through the Unknown/late-stub path~~ — VERIFIED sound
+- ~~Byte conservation through the Unknown/late-stub path~~, VERIFIED sound
   2026-08-22 (§2.5), including the sub-`update_interval` case.
 - **Connect/reconnect blindness (KNOWN LIMITATION, will ship).** Flows already
   established when the daemon or netifyd (re)starts have their remaining bytes
@@ -599,7 +599,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
   (§2.4, §2.5). Bounded to that window, self-healing, non-destructive. Cannot be
   fixed without an established-flow dump upstream. Documented in the
   README rather than hidden.
-- ~~**reshadow() exempted the flows it existed to correct**~~ — FOUND by an
+- ~~**reshadow() exempted the flows it existed to correct**~~, FOUND by an
   adversarial panel and FIXED 2026-08-24. `reshadow()` returned early on
   `dev_key == "router"`, which is exactly how a WAN-side capture of a NAT-ed
   client flow is classified, because netifyd reports the post-translation
@@ -637,7 +637,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
 
 ## 9. Roadmap (queued, post-v1)
 
-1. **v1.1 — `luci-app-appflow-icons`, a SEPARATE package.** Hand-curated mapping
+1. **v1.1, `luci-app-appflow-icons`, a SEPARATE package.** Hand-curated mapping
    (netify app id → icon) for the ~100 most-recognizable detectable apps, using
    monochrome SVGs from CC0/Apache-licensed collections (simple-icons /
    dashboard-icons), bundled locally, tinted by category color. Deliberately
@@ -648,7 +648,7 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
    time and falls back to letter-tile avatars; the icon package depends on
    nothing and breaks nothing when absent or removed. Same repo, second
    package directory.
-2. **v2 — Past day / Past week ranges** (persistence per §7 seams; flash-wear
+2. **v2, Past day / Past week ranges** (persistence per §7 seams; flash-wear
    policy: coarse-bucket flushes only, tmpfs-first with periodic backup,
    tiered downsampling).
 
