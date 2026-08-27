@@ -70,8 +70,20 @@ wrong when measured (documented in DESIGN 2.4 and 2.5).
 the two shell suites need a sandbox router and must be run one at a time.
 
     node tests/frontend-suite.js      # 31 checks, no router needed
-    sh   tests/protocol-suite.sh      # 54 checks, sandbox router, no traffic
+    sh   tests/protocol-suite.sh      # 71 checks, sandbox router, no traffic
     sh   tests/hardware-suite.sh      # 15 checks, sandbox router, real traffic
+
+`protocol-suite.sh` takes a group name: conservation, protocol, bounds,
+attribution, hostile, lifecycle, acl, ai, or all (the default).
+
+**`hardware-suite.sh` skips its wire-ratio check when netifyd does not
+capture every default-route interface**, and says which one. That check
+compares the test client's own veth counter against what appflow counted,
+so it silently assumes netifyd watches the path the traffic takes. On a
+router with a second uplink or a VPN outside netifyd's capture list the
+ratio drops and reads exactly like an attribution defect. It is not one,
+and it cost real time on 2026-08-27 before the precondition was made
+explicit.
 
 `frontend-suite.js` loads the REAL `common.js` under Node through
 `tests/luci-module.js`, a small `vm.Script` loader that supplies LuCI's

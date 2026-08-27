@@ -84,6 +84,34 @@ Statistics (past hour):
 
 ![Statistics](docs/statistics.png)
 
+## AI services get their own rows
+
+netifyd cannot classify AI traffic and will not soon. Its signature set is
+dated **August 2023**, carries 199 applications, and contains no AI vendor at
+all, so anything from Claude to Midjourney lands in generic HTTP/S.
+
+The identifying data is already present: netifyd reports the TLS SNI, and
+appflow already stores it. So appflow matches that name against a built-in
+table of around ninety AI service domains and gives them their own application
+rows and four categories: assistants, media, developer tools and
+infrastructure (aggregators, inference APIs, GPU rental, vector stores).
+
+**This is hostname matching, not DPI, and it is labelled as such.** It asserts
+a classification netifyd did not make. netifyd's own answer always wins except
+for a handful of services whose parent brand it recognises and would otherwise
+swallow (Gemini under Google, Copilot under GitHub), so the table falls silent
+by itself if Netify ever ship AI signatures.
+
+Matching is anchored on label boundaries, never a substring, so
+`anthropic.com.attacker.example` is not labelled Anthropic. It changes an
+identity and never a byte: byte conservation is asserted across a batch
+containing AI flows.
+
+Turn it off with `option ai_breakout '0'` in `/etc/config/appflow`. Two things
+it cannot do: match a service behind a shared CDN hostname, and survive ECH,
+which encrypts the SNI. netifyd has the same ECH exposure. Detail in
+[docs/DESIGN.md](docs/DESIGN.md) section 11.
+
 ## Known limitations
 
 Read these before installing. They are measured and documented rather than
@@ -151,14 +179,21 @@ number hides cap pressure underneath normal behaviour.
 
 ## Tests
 
-Three suites, 100 checks, no failures. Two need a sandbox router; one needs
+Three suites, 117 checks, no failures. Two need a sandbox router; one needs
 nothing but Node and runs on every push.
 
 | suite | checks | what it does |
 |---|---|---|
 | `tests/frontend-suite.js` | 31 | loads the real view code under Node. Mostly regression tests for defects that shipped. |
-| `tests/protocol-suite.sh` | 54 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
+| `tests/protocol-suite.sh` | 71 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
 | `tests/hardware-suite.sh` | 15 | drives real traffic and compares against the client interface's own counter in `/sys/class/net`, which nothing in this daemon can influence. |
+
+Every check names, in a comment written before the assertion, the smallest
+edit to the *product* that turns it red, and those sabotages are actually
+run. That is what caught three checks in the 2026-08-27 round that could
+not fail at all, two of them in the group written to prove the AI matcher
+refuses lookalike domains.
+
 
 Every check carries a comment naming the edit to the *product* that turns it
 red, written before the assertion. Details in

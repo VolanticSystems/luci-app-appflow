@@ -1043,6 +1043,234 @@ test_acl() {
 	fi
 }
 
+# ------------------------------------------------------------- AI breakout
+
+# A flow carrying an SNI. Separate from flow_ev() rather than an extra
+# parameter on it, because every existing caller of flow_ev states its byte
+# totals by hand and adding an optional field in the middle is how those calls
+# silently shift by one.
+#
+# ai_flow <digest> <app_id> <app_name> <host> <local> <other> <total>
+ai_flow() {
+	printf '{"type":"flow","internal":true,"interface":"br-lan","flow":{"digest":"%s","local_ip":"192.168.9.10","local_mac":"02:00:00:00:00:aa","other_ip":"93.184.216.34","other_mac":"02:00:00:00:00:ff","local_port":40001,"other_port":443,"ip_protocol":6,"host_server_name":"%s","detected_application":%s,"detected_application_name":"%s","detected_protocol":91,"detected_protocol_name":"TLS","category":{"application":10,"protocol":20},"local_bytes":0,"other_bytes":0,"total_bytes":0}}\n' \
+		"$1" "$4" "$2" "$3"
+	printf '{"type":"flow_stats","internal":true,"interface":"br-lan","flow":{"digest":"%s","local_ip":"192.168.9.10","local_mac":"02:00:00:00:00:aa","other_ip":"93.184.216.34","other_mac":"02:00:00:00:00:ff","local_bytes":%s,"other_bytes":%s,"total_bytes":%s}}\n' \
+		"$1" "$5" "$6" "$7"
+}
+
+# The application label the daemon settled on for a given app name, read from
+# the summary. Returns MISSING when absent, for the same reason field() does:
+# a helper that cannot find its subject must turn its check red rather than
+# return something plausible.
+# jsonfilter, not sed. The first version of app_bytes() ranged from the "name"
+# line to the next closing brace and looked for bytes_total inside it, but
+# bytes_total appears BEFORE name in the object, so the range never contained
+# it and every call returned the empty string. A structural query cannot make
+# that mistake; a line-range over JSON can, and did.
+app_present() {
+	local k
+	k=$(ubus call appflow summary '{"limit":50}' 2>/dev/null |
+	    jsonfilter -e "@.top_apps[@.name=\"$1\"].key" | head -1)
+	[ -n "$k" ] && echo YES || echo NO
+}
+
+# Bytes attributed to one application name. MISSING on a miss, never 0: a
+# helper that cannot find its subject must turn its check red rather than
+# return a number that happens to look plausible.
+app_bytes() {
+	local v
+	v=$(ubus call appflow summary '{"limit":50}' 2>/dev/null |
+	    jsonfilter -e "@.top_apps[@.name=\"$1\"].bytes_total" | head -1)
+	printf '%s' "${v:-MISSING}"
+}
+
+test_ai_breakout() {
+	head2 "AI BREAKOUT (hostname matching, and the things it must NOT match)"
+
+	# WHY THIS FEATURE EXISTS, measured: /etc/netify.d/netify-apps.conf is dated
+	# 10 August 2023, holds 199 signatures, and contains no AI vendor at all, so
+	# this traffic arrives as generic HTTP/S with detected_application 0. The SNI
+	# is already present in the flow record. Everything below drives the REAL
+	# daemon through the fake netifyd socket, so the oracle is the daemon's own
+	# output rather than a reimplementation of its table.
+
+	uci set appflow.main.ai_breakout=1 2>/dev/null
+	uci commit appflow
+
+	# Byte totals stated by hand, chosen so no two sums coincide:
+	#
+	#   anthropic  A   local 1100  other 2200  total 3300
+	#   claude.ai  B   local  100   other  200  total  300
+	#   openai     C   local   11   other   22  total   33
+	#   evil       D   local    7   other   13  total   20
+	#
+	#   Anthropic (Claude) must aggregate A+B = 3600 into ONE row.
+	#   sum(total) over all four = 3653
+	{
+		hello
+		ai_flow AI000001 0 "" "api.anthropic.com"                 1100 2200 3300
+		ai_flow AI000002 0 "" "claude.ai"                          100  200  300
+		ai_flow AI000003 0 "" "api.openai.com"                      11   22   33
+		# SUFFIX ANCHORING. This host is registrable by anyone and a substring
+		# test on "anthropic.com" matches it. It must not be labelled Anthropic.
+		#
+		# SABOTAGE: in ai_match(), replace the label-boundary suffix rebuild with
+		# an index()/substring test. This check goes red on its own.
+		ai_flow AI000004 0 "" "anthropic.com.attacker.example"        7   13   20
+	} > "$EV"
+	feed_and_settle
+
+	chk "an SNI netifyd could not classify is labelled" \
+	    "YES" "$(app_present 'Anthropic (Claude)')"
+	chk "and so is a second AI vendor" "YES" "$(app_present 'OpenAI')"
+
+	# THE MERGE. anthropic.com and claude.ai are one vendor. Keying on the
+	# matched suffix instead of the label would produce two identically-named
+	# rows, which looks like a rendering bug and hides the real total.
+	#
+	# SABOTAGE: in flow_identify(), set `key = "ai:" + ai.via`. The bytes split
+	# across two rows and this drops to 3300.
+	chk "two domains of one vendor aggregate into a single row" \
+	    "3600" "$(app_bytes 'Anthropic (Claude)')"
+
+	# THE LOOKALIKE MUST LAND SOMEWHERE ELSE, and that is asserted by finding it
+	# where it belongs rather than by failing to find it where it does not.
+	#
+	# Two earlier versions of this check were TAUTOLOGIES, caught by running the
+	# sabotage rather than by reading them. One asked whether an app named
+	# "Anthropic (Claude)x" was present, which nothing can ever make true. The
+	# other grepped the summary for the hostname, which the summary does not
+	# carry at all. Both stayed green with the suffix matcher replaced by a
+	# substring test, which is the exact defect they were written for.
+	#
+	# anthropic.com.attacker.example arrives as app_id 0 over detected_protocol
+	# 91, so unlabelled it aggregates as "TLS" carrying its own 20 bytes. Under
+	# a substring matcher those bytes move into Anthropic and this reads MISSING.
+	#
+	# SABOTAGE: in ai_match(), match with index() instead of rebuilding the last
+	# N labels.
+	chk "a lookalike domain keeps its own identity, not the vendor it imitates" \
+	    "20" "$(app_bytes TLS)"
+
+	# The counter must move, and by exactly the number of flows relabelled.
+	# Without this, "the label appeared" could come from anywhere.
+	#
+	# SABOTAGE: delete `stats.ai_labeled++`.
+	chk "exactly three flows were relabelled" "3" "$(field flows ai_labeled)"
+
+	# ACCOUNTING IS UNTOUCHED. This is the check that matters most: the feature
+	# changes an identity and must not be able to change a byte.
+	#
+	# SABOTAGE: move the AI block after flow_attach(), or have it touch fr.a.
+	local tot
+	tot=$(ubus call appflow summary 2>/dev/null | sed -n 's/.*"bytes_total": *\([0-9]*\).*/\1/p' | head -1)
+	chk "byte conservation holds with AI flows present (3300+300+33+20)" \
+	    "3653" "${tot:-MISSING}"
+
+	head2 "AI BREAKOUT: netifyd's own answer wins unless we say otherwise"
+
+	# THE SELF-RETIRING PROPERTY. If netifyd identified an application, its
+	# answer stands. That is what makes this table fall silent by itself the day
+	# Netify ship AI signatures, instead of permanently shadowing better data.
+	#
+	# SABOTAGE: drop the `app_id == 0` half of the gate in flow_identify(). The
+	# first check goes red.
+	{
+		hello
+		ai_flow AI000010 4242 "netify.some-cdn" "api.anthropic.com" 500 500 1000
+	} > "$EV"
+	feed_and_settle
+
+	# "netify.some-cdn" renders as "Some CDN" via display_name()/title_case(),
+	# read back from a live run rather than predicted.
+	chk "netifyd's application identification is NOT overridden" \
+	    "YES" "$(app_present 'Some CDN')"
+	chk "and the AI label was not applied over it" \
+	    "NO" "$(app_present 'Anthropic (Claude)')"
+	chk "so no flow was relabelled" "0" "$(field flows ai_labeled)"
+
+	# THE EXCEPTION. A `strong` entry overrides even a netifyd identification,
+	# because netifyd recognises the PARENT brand and would swallow the service
+	# inside it: Gemini reported as Google, Copilot as GitHub.
+	#
+	# SABOTAGE: change gemini.google.com's third field to false. This goes red
+	# and the check above stays green, which is the distinction it exists for.
+	{
+		hello
+		ai_flow AI000011 4243 "netify.google" "gemini.google.com" 400 600 1000
+	} > "$EV"
+	feed_and_settle
+
+	chk "a strong entry DOES override netifyd's parent-brand answer" \
+	    "YES" "$(app_present 'Google Gemini')"
+
+	head2 "AI BREAKOUT: hostile and awkward hostnames"
+
+	# "constructor" and "toString.prototype" as hostnames.
+	#
+	# These are here to PROVE ucode behaves as the daemon's comment claims, not
+	# because they catch a live bug. In a browser `{}["constructor"]` returns a
+	# function and such a hostname would read as a match; in ucode there is no
+	# prototype chain and the lookup is null. Confirmed by sabotage: replacing
+	# the array type-check with a truthiness test changes no result here, so
+	# this group is NOT the reason that check exists and must not claim to be.
+	#
+	# What these hostnames do still prove is that a label-shaped input which is
+	# not a domain neither matches nor crashes the daemon.
+	#
+	# Also covers case folding and a trailing dot, both legal in a FQDN and both
+	# capable of shifting every suffix by one label.
+	{
+		hello
+		ai_flow AI000020 0 "" "constructor"          10 10 20
+		ai_flow AI000021 0 "" "toString.prototype"   10 10 20
+		ai_flow AI000022 0 "" "API.ANTHROPIC.COM"    30 30 60
+		ai_flow AI000023 0 "" "api.openai.com."      40 40 80
+		ai_flow AI000024 0 "" "notanthropic.com"     50 50 100
+		ai_flow AI000025 0 "" ""                     60 60 120
+	} > "$EV"
+	feed_and_settle
+
+	chk "an uppercase SNI still matches" "YES" "$(app_present 'Anthropic (Claude)')"
+	chk "a trailing-dot FQDN still matches" "YES" "$(app_present 'OpenAI')"
+
+	# notanthropic.com shares a substring with anthropic.com but not a label
+	# boundary, and must not match. Counted rather than name-checked, because
+	# "is Anthropic present" is already true from AI000022 in this same batch.
+	#
+	# SABOTAGE: as for the lookalike above.
+	chk "exactly two of six awkward hostnames were relabelled" \
+	    "2" "$(field flows ai_labeled)"
+
+	if [ "$(field bytes reported)" = "MISSING" ]; then
+		bad "status did not report byte totals after the hostile batch"
+	else
+		ok "the daemon survived the hostile hostname batch and still reports"
+	fi
+
+	head2 "AI BREAKOUT: the off switch"
+
+	# A user who does not want an asserted classification must be able to turn
+	# it off completely, and the setting must be visible in status so support
+	# questions can be answered without asking for the config file.
+	#
+	# SABOTAGE: ignore cfg.ai_breakout in flow_identify().
+	uci set appflow.main.ai_breakout=0
+	uci commit appflow
+	{
+		hello
+		ai_flow AI000030 0 "" "api.anthropic.com" 100 100 200
+	} > "$EV"
+	feed_and_settle
+
+	chk "with ai_breakout off, nothing is relabelled" "0" "$(field flows ai_labeled)"
+	chk "and the AI label does not appear" "NO" "$(app_present 'Anthropic (Claude)')"
+	chk "status reports the setting" "0" "$(field config ai_breakout)"
+
+	uci set appflow.main.ai_breakout=1
+	uci commit appflow
+}
+
 # ------------------------------------------------------------------------ run
 
 printf 'appflow protocol and bounds suite\n'
@@ -1098,8 +1326,10 @@ case "$GROUP" in
 	hostile)      test_hostile ;;
 	lifecycle)    test_lifecycle ;;
 	acl)          test_acl ;;
+	ai)           test_ai_breakout ;;
 	all)          test_conservation; test_protocol; test_bounds
-	              test_attribution; test_hostile; test_lifecycle; test_acl ;;
+	              test_attribution; test_hostile; test_lifecycle; test_acl
+	              test_ai_breakout ;;
 	*)            printf "unknown group '%s'\n" "$GROUP"; exit 2 ;;
 esac
 
