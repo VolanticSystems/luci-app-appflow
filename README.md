@@ -264,5 +264,5 @@ is, wansentry keeps it moving when a line drops. Neither depends on the other.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE). The icon pack is a separate package with
+Apache-2.0, see [LICENSE](LICENSE). The icon pack is a separate package with
 its own licensing; see `icons/licenses/` in that package.
