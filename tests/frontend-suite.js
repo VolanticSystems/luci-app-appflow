@@ -140,6 +140,25 @@ else
 
 // -------------------------------------------------------- normalisers
 
+head('LABELS: netifyd slugs are cased, deliberate casing is left alone');
+
+// catLabel() used to lowercase its input before title-casing it. That is
+// harmless for netifyd's own categories, which are lowercase slugs, and it
+// destroyed appflow's AI categories: "AI assistants" came back as
+// "Ai assistants", because the title-case split is on [-_] and a space is
+// neither. It rendered that way on a live router before anyone noticed.
+//
+// SABOTAGE: remove the /[A-Z]/ pass-through in catLabel(). The first two go
+// red and the netifyd cases stay green, which is the distinction that matters.
+chk('a category with deliberate capitals is left alone',
+    'AI assistants', c.catLabel('AI assistants'));
+chk('and so is a second one', 'AI infrastructure', c.catLabel('AI infrastructure'));
+
+// The netifyd side must be unchanged by that pass-through.
+chk('a lowercase netifyd slug is still title-cased', 'Networking', c.catLabel('networking'));
+chk('and a hyphenated one still splits', 'Social Network', c.catLabel('social-network'));
+chk('an empty category is still Unclassified', 'Unclassified', c.catLabel(''));
+
 head('NORMALISERS: idempotent, and never inventing a total');
 
 // THE DEFECT, found 2026-08-25. normSeries() was not idempotent and one caller

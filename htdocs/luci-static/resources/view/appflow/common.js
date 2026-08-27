@@ -555,10 +555,24 @@ return baseclass.extend({
 	},
 
 	catLabel: function(cat) {
-		var c = String(cat || '').toLowerCase();
+		var raw = String(cat || '');
 
-		if (!c.length)
+		if (!raw.length)
 			return _('Unclassified');
+
+		/* Already-cased categories pass through untouched, exactly as
+		 * appLabel() treats already-pretty application names.
+		 *
+		 * netifyd's own categories are lowercase slugs ("web", "networking"),
+		 * so lowercasing them first was harmless. appflow's AI categories are
+		 * not: "AI assistants" was being lowercased to "ai assistants" and then
+		 * title-cased back to "Ai assistants", because the split is on [-_] and
+		 * a space is neither. Deliberate capitalisation must survive, and there
+		 * is no casing rule that turns "ai" into "AI" without a word list. */
+		if (/[A-Z]/.test(raw))
+			return raw;
+
+		var c = raw.toLowerCase();
 
 		if (CATEGORY_LABELS[c])
 			return CATEGORY_LABELS[c];
