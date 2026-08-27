@@ -231,6 +231,35 @@ test_restart() {
 	# is weak evidence of correctness, and one green run is not proof the
 	# attribution is sound. The conservation counters above are the dependable
 	# signal; this one catches gross breakage.
+	# PRECONDITION, CHECKED RATHER THAN ASSUMED: netifyd must actually capture
+	# the path this traffic takes. `wire()` reads the test client's own veth, so
+	# it counts every byte the client sent regardless of which uplink carried
+	# them, while appflow can only ever count what netifyd was told to watch.
+	#
+	# This bit on 2026-08-27. A bench router had a second uplink and a VPN
+	# tunnel added to it while netifyd still ran `-I br-lan -E wan`, and the
+	# ratio dropped to 0.62. That reads as an attribution defect and is not one:
+	# the traffic left by a path netifyd was never watching. The unmodified
+	# shipped daemon produced the same failure, which is the only reason it was
+	# not chased as a regression.
+	#
+	# A ratio computed over an uncaptured path is not a weak signal, it is a
+	# meaningless one, so this skips loudly instead of reporting a number.
+	local caps uncap
+	caps=$(ps w 2>/dev/null | sed -n 's/.*netifyd.*/&/p' | head -1)
+	uncap=""
+	for d in $(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | sort -u); do
+		case " $caps " in
+			*" $d "*) ;;
+			*) uncap="$uncap $d" ;;
+		esac
+	done
+	if [ -n "$uncap" ]; then
+		skip "netifyd does not capture default-route interface(s):$uncap -- ratio would be meaningless"
+		[ "$(field bytes leaked)" = "0" ] && ok "leaked still 0" || bad "leaked != 0"
+		return 0
+	fi
+
 	ubus call appflow reset >/dev/null 2>&1; sleep 2
 	local w0; w0=$(wire)
 

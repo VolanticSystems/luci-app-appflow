@@ -16,3 +16,19 @@ config appflow 'main'
 
 	# Drop a flow from the table after this many seconds without an update.
 	option idle_timeout '300'
+
+	# Break AI services out as their own applications and category.
+	#
+	# netifyd cannot classify them: its signature set is dated August 2023 and
+	# contains no AI vendors at all, so this traffic arrives as generic HTTP/S.
+	# The TLS SNI is already in the flow record, so appflowd matches it against
+	# a built-in table of AI service domains and relabels the flow.
+	#
+	# This is HOSTNAME MATCHING, NOT DPI. It asserts a classification netifyd
+	# did not make. netifyd's own answer always wins except for a handful of
+	# services whose parent brand netifyd recognises (Gemini under Google,
+	# Copilot under GitHub), so this falls silent by itself if Netify ever ship
+	# AI signatures. It changes identity only and never affects byte accounting.
+	#
+	# 0 disables it entirely.
+	option ai_breakout '1'

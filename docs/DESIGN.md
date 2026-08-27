@@ -665,3 +665,103 @@ label (resolver tries all three). The frontend ships normalisers for
 both dialects in `view/appflow/common.js`. luci-lib-chartjs was dropped:
 the packaged build is a Chart.js 1.x fragment (Doughnut/Pie only), and
 inline SVG follows LuCI theme variables, which canvas cannot.
+
+## 11. AI service breakout
+
+### 11.1 Why netifyd cannot do this
+
+Measured on two routers, 2026-08-27. `/etc/netify.d/netify-apps.conf` is the
+Netify Agent's signature set. On both it is dated **10 August 2023**, carries
+**199** application signatures, and contains **zero** entries matching
+anthropic, claude, openai, chatgpt, huggingface, perplexity, mistral, copilot,
+bard or gemini.
+
+So AI traffic arrives with `detected_application` 0 and aggregates into generic
+HTTP/S alongside everything else. This is vendor data three years stale, not a
+configuration problem, and nothing on the router can change it.
+
+### 11.2 Why appflow can
+
+netifyd already reports the TLS SNI as `host_server_name`, and appflow already
+stores it. Traffic generated to the real endpoints on the bench carried
+`api.anthropic.com`, `claude.ai` and `api.openai.com` with no code change at
+all. The identifying data was there the whole time; nothing was making use of
+it.
+
+The daemon is the right layer because aggregation happens there. The browser
+only ever receives summarised rows, so a frontend fix would arrive after the
+decision that matters had already been made.
+
+### 11.3 What it does
+
+In `flow_identify()`, after netifyd's identity is resolved and after the
+category is derived, the SNI is matched by **domain suffix** against a built-in
+table. On a hit the application key, label, tag and category are replaced.
+
+```
+key    ai:anthropic-claude
+name   Anthropic (Claude)
+tag    appflow.anthropic-claude
+cat    AI assistants
+```
+
+Four categories: `AI assistants`, `AI media`, `AI developer`,
+`AI infrastructure`. The last covers aggregators, inference APIs, GPU rental
+and vector stores, which are different businesses but one thing from a
+network's point of view.
+
+**Keyed on the vendor label, not the matched domain.** `anthropic.com` and
+`claude.ai` are one vendor and must aggregate into one row; keying on the
+suffix would produce two identically-named rows and split the total.
+
+**The `appflow.` tag prefix is deliberate.** netifyd's own tags are `netify.*`.
+Nothing here pretends to have come from netifyd.
+
+### 11.4 The gate, and why it makes the feature self-retiring
+
+**netifyd's own answer wins.** The override runs only when
+`detected_application` is 0, with one exception: entries flagged `strong`,
+which override even a positive identification.
+
+`strong` is set only where netifyd is known to recognise the PARENT brand and
+would otherwise swallow the AI service inside it: Gemini reported as Google,
+Copilot as GitHub, Qwen as Alibaba. Everywhere else the rule is conservative,
+which means **the day Netify ship AI signatures this table falls silent by
+itself** rather than permanently shadowing better data.
+
+### 11.5 Matching is anchored on label boundaries
+
+The SNI is lowercased, a trailing dot is stripped, and the last two, three and
+four labels are rebuilt and looked up in turn. Never a substring test.
+
+`anthropic.com.attacker.example` is a hostname anyone can register and point
+anywhere. A substring match on `anthropic.com` matches it. Rebuilding the last
+N labels makes that impossible by construction rather than by care, and the
+suite asserts it with a flow carrying exactly that hostname.
+
+### 11.6 Accounting is untouched
+
+This changes an identity, never a byte. `account()` never sees it, byte
+conservation is exactly as it was, and the existing conservation checks still
+hold. `tests/protocol-suite.sh ai` asserts a hand-computed total across a batch
+containing AI flows for precisely this reason.
+
+### 11.7 Limitations, stated rather than discovered
+
+- **This is hostname matching, not DPI.** It asserts a classification netifyd
+  did not make. The technique is legitimate, matching the SNI is what netifyd
+  itself does for HTTP/S, but the honest description is "we recognise the
+  name", never "we inspected the protocol".
+- **The list rots.** New services appear constantly and nothing here updates
+  itself. `option ai_breakout '0'` turns it off entirely.
+- **ECH would end it.** Encrypted Client Hello encrypts the SNI. netifyd has
+  the identical exposure so this is no worse than the status quo, but it is not
+  durable and should not be sold as such.
+- **Region-encoded hostnames under a generic cloud domain cannot be matched.**
+  `bedrock-runtime.us-east-1.amazonaws.com` has no suffix specific to Bedrock,
+  and matching `amazonaws.com` would label every S3 bucket on the network as
+  AI. Deliberately absent rather than approximated.
+- **A service behind a shared CDN hostname is invisible**, because the SNI
+  names the CDN.
+- **No icons ship for these entries.** They render as letter tiles until the
+  icon pack gains matching `appflow.*` keys.

@@ -73,7 +73,8 @@ const CFG_DEFAULTS = {
 	flow_max: 4096,
 	rate_window: 30,
 	top_n: 10,
-	idle_timeout: 300
+	idle_timeout: 300,
+	ai_breakout: 1
 };
 
 // Conntrack snapshot used to resolve NAT twins (3.2).  `map` is keyed on the
@@ -124,6 +125,9 @@ let stats = {
 	events: 0, frames: 0, malformed: 0, unknown: 0, unknown_types: {},
 	by_type: {}, reconnects: 0, connect_fail: 0, purges: 0,
 	flows_seen: 0, flows_late: 0, flows_pruned: 0, flows_dropped: 0,
+	// Flows relabelled by the AI hostname table. Observable so a test can
+	// assert the feature fired rather than inferring it from a label.
+	ai_labeled: 0,
 	// Flows evicted because the table was AT ITS CAP, as opposed to evicted for
 	// going idle.  The two used to share flows_pruned, where cap pressure was
 	// invisible underneath ordinary housekeeping.
@@ -238,7 +242,11 @@ function cfg_load() {
 		flow_max: clampi(num(s.flow_max, CFG_DEFAULTS.flow_max), 64, 65536),
 		rate_window: clampi(num(s.rate_window, CFG_DEFAULTS.rate_window), 5, 600),
 		top_n: clampi(num(s.top_n, CFG_DEFAULTS.top_n), 1, 100),
-		idle_timeout: clampi(num(s.idle_timeout, CFG_DEFAULTS.idle_timeout), 15, 86400)
+		idle_timeout: clampi(num(s.idle_timeout, CFG_DEFAULTS.idle_timeout), 15, 86400),
+		// Absent means ON. A dashboard feature that defaults to off is a
+		// feature nobody sees, and this one only ever relabels flows netifyd
+		// had no answer for.
+		ai_breakout: num(s.ai_breakout, CFG_DEFAULTS.ai_breakout) != 0
 	};
 	cfg.rate_ms = cfg.rate_window * 1000;
 	cfg.idle_ms = cfg.idle_timeout * 1000;
@@ -900,6 +908,208 @@ function ct_nat_twin(f, now) {
 	return (v == null) ? null : v;
 }
 
+/* ------------------------------------------------------------------ *
+ * AI service breakout (§10)
+ *
+ * WHY THIS EXISTS, measured rather than assumed.
+ *
+ * netifyd cannot classify AI traffic and will not soon. Its signature set,
+ * /etc/netify.d/netify-apps.conf, is dated 10 August 2023 on both routers
+ * checked, carries 199 application signatures, and contains ZERO entries for
+ * anthropic, claude, openai, chatgpt, huggingface, perplexity, mistral,
+ * copilot, bard or gemini. So this traffic arrives with detected_application 0
+ * and lands in generic HTTP/S alongside everything else.
+ *
+ * But the identifying data is already here. netifyd reports the TLS SNI as
+ * host_server_name, and flows to the real endpoints carry api.anthropic.com,
+ * claude.ai and api.openai.com with no code change on our side. The daemon is
+ * therefore the right layer: aggregation happens here, and the browser only
+ * ever sees summarised rows.
+ *
+ * THIS IS HOSTNAME MATCHING, NOT DPI, AND MUST BE DESCRIBED THAT WAY. It
+ * asserts a classification netifyd did not make. The technique is legitimate
+ * -- matching the SNI is the same mechanism netifyd itself uses for HTTP/S --
+ * but the honest framing is "we recognise the name", not "we inspected the
+ * protocol".
+ *
+ * Three limitations, stated here so they are not discovered later:
+ *
+ *   - The list rots. New services appear constantly and nothing here updates
+ *     itself. `ai_breakout '0'` turns the whole thing off.
+ *   - ECH (Encrypted Client Hello) encrypts the SNI and would end this
+ *     outright. netifyd has the identical exposure, so this is not worse than
+ *     the status quo, but it is not durable either.
+ *   - Region-encoded hostnames under a generic cloud domain cannot be matched
+ *     by suffix without false positives. bedrock-runtime.us-east-1.amazonaws.com
+ *     is the obvious example and is deliberately absent: no suffix of it is
+ *     specific to Bedrock, and matching amazonaws.com would label every S3
+ *     bucket on the network as AI.
+ *
+ * ACCOUNTING IS NOT AFFECTED. This changes an identity, never a byte count.
+ * account() never sees it, so byte conservation is exactly as it was and the
+ * existing conservation checks still hold.
+ */
+
+/* Keyed on a domain suffix, matched against the last two, three or four labels
+ * of the SNI. Value is [ app label, category, strong ].
+ *
+ * `strong` means: override even when netifyd DID identify an application. It
+ * is set only where netifyd is known to recognise the PARENT brand and would
+ * otherwise swallow the AI service inside it -- Gemini reported as "Google",
+ * Copilot as "GitHub". Everywhere else the rule is conservative: netifyd's own
+ * answer wins, so the day Netify ships AI signatures this table goes quiet by
+ * itself instead of permanently shadowing better data.
+ */
+const AI_HOSTS = {
+	// ---- assistants and model vendors --------------------------------
+	"anthropic.com":        [ "Anthropic (Claude)", "AI assistants", false ],
+	"claude.ai":            [ "Anthropic (Claude)", "AI assistants", false ],
+	"openai.com":           [ "OpenAI",             "AI assistants", false ],
+	"chatgpt.com":          [ "OpenAI (ChatGPT)",   "AI assistants", false ],
+	"oaistatic.com":        [ "OpenAI",             "AI assistants", false ],
+	"oaiusercontent.com":   [ "OpenAI",             "AI assistants", false ],
+	"gemini.google.com":    [ "Google Gemini",      "AI assistants", true  ],
+	"aistudio.google.com":  [ "Google Gemini",      "AI assistants", true  ],
+	"generativelanguage.googleapis.com":
+	                        [ "Google Gemini",      "AI assistants", true  ],
+	"x.ai":                 [ "xAI (Grok)",         "AI assistants", false ],
+	"grok.com":             [ "xAI (Grok)",         "AI assistants", false ],
+	"mistral.ai":           [ "Mistral",            "AI assistants", false ],
+	"cohere.com":           [ "Cohere",             "AI assistants", false ],
+	"cohere.ai":            [ "Cohere",             "AI assistants", false ],
+	"deepseek.com":         [ "DeepSeek",           "AI assistants", false ],
+	"perplexity.ai":        [ "Perplexity",         "AI assistants", false ],
+	"moonshot.cn":          [ "Moonshot (Kimi)",    "AI assistants", false ],
+	"bigmodel.cn":          [ "Zhipu",              "AI assistants", false ],
+	"dashscope.aliyuncs.com":
+	                        [ "Alibaba Qwen",       "AI assistants", true  ],
+	"ai21.com":             [ "AI21",               "AI assistants", false ],
+	"meta.ai":              [ "Meta AI",            "AI assistants", false ],
+	"reka.ai":              [ "Reka",               "AI assistants", false ],
+	"character.ai":         [ "Character.AI",       "AI assistants", false ],
+	"poe.com":              [ "Poe",                "AI assistants", false ],
+	"phind.com":            [ "Phind",              "AI assistants", false ],
+
+	// ---- media generation --------------------------------------------
+	"midjourney.com":       [ "Midjourney",         "AI media", false ],
+	"stability.ai":         [ "Stability AI",       "AI media", false ],
+	"runwayml.com":         [ "Runway",             "AI media", false ],
+	"elevenlabs.io":        [ "ElevenLabs",         "AI media", false ],
+	"suno.com":             [ "Suno",               "AI media", false ],
+	"suno.ai":              [ "Suno",               "AI media", false ],
+	"udio.com":             [ "Udio",               "AI media", false ],
+	"lumalabs.ai":          [ "Luma",               "AI media", false ],
+	"bfl.ai":               [ "Black Forest Labs",  "AI media", false ],
+	"ideogram.ai":          [ "Ideogram",           "AI media", false ],
+	"leonardo.ai":          [ "Leonardo",           "AI media", false ],
+	"pika.art":             [ "Pika",               "AI media", false ],
+	"heygen.com":           [ "HeyGen",             "AI media", false ],
+	"synthesia.io":         [ "Synthesia",          "AI media", false ],
+	"descript.com":         [ "Descript",           "AI media", false ],
+
+	// ---- coding assistants and dev tools -----------------------------
+	"githubcopilot.com":    [ "GitHub Copilot",     "AI developer", true  ],
+	"copilot.microsoft.com":[ "Microsoft Copilot",  "AI developer", true  ],
+	"cursor.sh":            [ "Cursor",             "AI developer", false ],
+	"cursor.com":           [ "Cursor",             "AI developer", false ],
+	"codeium.com":          [ "Codeium",            "AI developer", false ],
+	"windsurf.com":         [ "Windsurf",           "AI developer", false ],
+	"tabnine.com":          [ "Tabnine",            "AI developer", false ],
+	"sourcegraph.com":      [ "Sourcegraph Cody",   "AI developer", false ],
+	"v0.dev":               [ "v0",                 "AI developer", false ],
+	"bolt.new":             [ "Bolt",               "AI developer", false ],
+	"lovable.dev":          [ "Lovable",            "AI developer", false ],
+	"replit.com":           [ "Replit",             "AI developer", false ],
+
+	// ---- aggregators, inference APIs, GPU rental, AI infrastructure ---
+	"openrouter.ai":        [ "OpenRouter",         "AI infrastructure", false ],
+	"together.ai":          [ "Together AI",        "AI infrastructure", false ],
+	"together.xyz":         [ "Together AI",        "AI infrastructure", false ],
+	"replicate.com":        [ "Replicate",          "AI infrastructure", false ],
+	"replicate.delivery":   [ "Replicate",          "AI infrastructure", false ],
+	"fireworks.ai":         [ "Fireworks AI",       "AI infrastructure", false ],
+	"groq.com":             [ "Groq",               "AI infrastructure", false ],
+	"deepinfra.com":        [ "DeepInfra",          "AI infrastructure", false ],
+	"novita.ai":            [ "Novita",             "AI infrastructure", false ],
+	"hyperbolic.xyz":       [ "Hyperbolic",         "AI infrastructure", false ],
+	"anyscale.com":         [ "Anyscale",           "AI infrastructure", false ],
+	"sambanova.ai":         [ "SambaNova",          "AI infrastructure", false ],
+	"cerebras.ai":          [ "Cerebras",           "AI infrastructure", false ],
+	"huggingface.co":       [ "Hugging Face",       "AI infrastructure", false ],
+	"hf.co":                [ "Hugging Face",       "AI infrastructure", false ],
+	"vast.ai":              [ "Vast.ai",            "AI infrastructure", false ],
+	"runpod.io":            [ "RunPod",             "AI infrastructure", false ],
+	"runpod.ai":            [ "RunPod",             "AI infrastructure", false ],
+	"lambdalabs.com":       [ "Lambda",             "AI infrastructure", false ],
+	"paperspace.com":       [ "Paperspace",         "AI infrastructure", false ],
+	"coreweave.com":        [ "CoreWeave",          "AI infrastructure", false ],
+	"modal.com":            [ "Modal",              "AI infrastructure", false ],
+	"baseten.co":           [ "Baseten",            "AI infrastructure", false ],
+	"beam.cloud":           [ "Beam",               "AI infrastructure", false ],
+	"salad.com":            [ "Salad",              "AI infrastructure", false ],
+	"tensordock.com":       [ "TensorDock",         "AI infrastructure", false ],
+	"fly.io":               [ "Fly.io",             "AI infrastructure", false ],
+	"wandb.ai":             [ "Weights & Biases",   "AI infrastructure", false ],
+	"langchain.com":        [ "LangChain",          "AI infrastructure", false ],
+	"pinecone.io":          [ "Pinecone",           "AI infrastructure", false ],
+	"weaviate.io":          [ "Weaviate",           "AI infrastructure", false ],
+	"qdrant.tech":          [ "Qdrant",             "AI infrastructure", false ],
+	"trychroma.com":        [ "Chroma",             "AI infrastructure", false ]
+};
+
+/* Match the SNI against AI_HOSTS by domain suffix.
+ *
+ * SUFFIX, ANCHORED ON A LABEL BOUNDARY -- never a substring test. A substring
+ * match on "anthropic.com" also matches "anthropic.com.attacker.example", which
+ * is a hostname anyone can register and point at anything. Splitting on labels
+ * and rebuilding the last N makes that impossible by construction rather than
+ * by care.
+ *
+ * Tries the last two labels first, then three, then four, so a specific entry
+ * (gemini.google.com) is reachable without a linear scan of the table and a
+ * generic parent cannot shadow it.
+ */
+function ai_match(host) {
+	let h = lc(trim(host ?? ""));
+
+	if (!length(h))
+		return null;
+
+	/* A trailing dot is legal in a FQDN and would otherwise produce an empty
+	 * final label, shifting every suffix by one and matching nothing. */
+	if (substr(h, -1) == ".")
+		h = substr(h, 0, length(h) - 1);
+
+	let parts = split(h, ".");
+	let n = length(parts);
+
+	if (n < 2)
+		return null;
+
+	for (let take = 2; take <= 4 && take <= n; take++) {
+		let suffix = join(".", slice(parts, n - take));
+		let hit = AI_HOSTS[suffix];
+
+		/* Type-checked rather than merely truthy.
+		 *
+		 * In a BROWSER this would be load-bearing: `{}["constructor"]` returns
+		 * a function, so a hostname of "constructor" would read as a hit. In
+		 * ucode it is not, because ucode objects have no prototype chain and
+		 * that lookup is null. Verified by sabotage: replacing this with a
+		 * truthiness test changes no test result.
+		 *
+		 * It stays because what it actually guards is a malformed entry in the
+		 * table above -- a two-element row, or a string where an array belongs
+		 * -- which would otherwise be indexed as if it were well formed and
+		 * produce a null label on a live router. It is NOT a defence against a
+		 * prototype-key hostname, and should not be described as one. */
+		if (type(hit) == "array" && length(hit) == 3)
+			return { app: hit[0], cat: hit[1], strong: hit[2], via: suffix };
+	}
+
+	return null;
+}
+
 function flow_identify(fr, ev, f, now) {
 	let app_id = num(f.detected_application, 0);
 	let proto_id = num(f.detected_protocol, 0);
@@ -933,6 +1143,39 @@ function flow_identify(fr, ev, f, now) {
 
 	if (length(f.host_server_name ?? ""))
 		fr.host = substr(f.host_server_name, 0, 63);
+
+	// AI service breakout (10).  Runs AFTER the netifyd identity is resolved and
+	// after `cat`, because it replaces both, and BEFORE attribution, because
+	// nothing below this point depends on the app identity.
+	//
+	// The gate is deliberately conservative: netifyd's own answer wins unless
+	// the entry is marked `strong`, which is set only where netifyd is known to
+	// recognise the parent brand and would swallow the AI service inside it.
+	// So the day Netify ships AI signatures, this table falls silent by itself
+	// rather than permanently shadowing better data.
+	//
+	// Identity only.  No byte count is touched here, account() never sees this,
+	// and conservation is unaffected.
+	if (cfg.ai_breakout && length(fr.host ?? "")) {
+		let ai = ai_match(fr.host);
+
+		if (ai && (app_id == 0 || ai.strong)) {
+			// Key on the LABEL, not on the matched suffix: anthropic.com and
+			// claude.ai are one vendor and must aggregate into one row, not two
+			// identically-named ones.
+			let slug = lc(replace(ai.app, /[^a-zA-Z0-9]+/g, "-"));
+			slug = replace(slug, /^-+/, "");
+			slug = replace(slug, /-+$/, "");
+
+			key = "ai:" + slug;
+			label = ai.app;
+			// The icon pack is keyed on this tag. An `appflow.` prefix keeps the
+			// namespace honest: nothing here pretends to have come from netifyd.
+			fr.tag = "appflow." + slug;
+			cat = ai.cat;
+			stats.ai_labeled++;
+		}
+	}
 
 	// Attribution (§3.2).  netifyd's "local"/"other" labels follow its own
 	// topology view, not ours, so decide which endpoint is *our* device:
@@ -1912,12 +2155,15 @@ function m_status(req) {
 	r.socket = { path: cfg.socket_path, connected: connected, reconnects: stats.reconnects,
 	             connect_failures: stats.connect_fail };
 	r.config = { flow_max: cfg.flow_max, rate_window: cfg.rate_window,
-	             top_n: cfg.top_n, idle_timeout: cfg.idle_timeout };
+	             top_n: cfg.top_n, idle_timeout: cfg.idle_timeout,
+	             // 0/1 rather than a JSON boolean, so every value in this
+	             // object is numeric and one reader parses all of them.
+	             ai_breakout: cfg.ai_breakout ? 1 : 0 };
 	r.flows = { tracked: nflows, seen: stats.flows_seen, late: stats.flows_late,
 	            pruned: stats.flows_pruned, shed: stats.flows_shed,
 	            dropped: stats.flows_dropped,
 	            shadowed: stats.shadowed, purged: stats.purges,
-	            no_total: stats.no_total };
+	            no_total: stats.no_total, ai_labeled: stats.ai_labeled };
 	// NAT twin resolution (3.2).  `available` false means conntrack could not
 	// be read, in which case external captures are shadowed on the safe
 	// default and the router's own traffic is not attributed.  A persistently
