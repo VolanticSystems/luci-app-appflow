@@ -71,8 +71,12 @@ return view.extend({
 		this.searchInput = E('input', {
 			'type': 'text',
 			'class': 'cbi-input-text',
-			'placeholder': _('Search app name'),
-			'aria-label': _('Search app name'),
+			/* It has always matched the CATEGORY label as well as the app name.
+			 * Saying "Search app name" meant nobody could discover that, which
+			 * is closer to a defect than a wording nit: the capability shipped
+			 * and the label concealed it. */
+			'placeholder': _('Filter by application or category'),
+			'aria-label': _('Filter by application or category'),
 			'input': L.bind(function(ev) {
 				this.filter = (ev.target.value || '').toLowerCase();
 				this.paintTable();
@@ -257,11 +261,16 @@ return view.extend({
 		    all = this.allRow(apps),
 		    total = apps.length;
 
-		if (this.filter.length)
+		/* Shared with the overview via common.js, so the two pages cannot drift
+		 * and the logic is reachable by a Node test. Adds exclusion: a term
+		 * prefixed with a minus removes matching rows, which is what you want
+		 * when one heavy application is burying everything else. */
+		var terms = appflow.parseFilter(this.filter);
+
+		if (terms.length)
 			apps = apps.filter(function(a) {
-				return a.label.toLowerCase().indexOf(self.filter) >= 0 ||
-				       a.key.toLowerCase().indexOf(self.filter) >= 0 ||
-				       appflow.catLabel(a.cat).toLowerCase().indexOf(self.filter) >= 0;
+				return appflow.matchFilter(terms,
+					[ a.label, a.key, appflow.catLabel(a.cat) ]);
 			});
 
 		apps.sort(function(a, b) {

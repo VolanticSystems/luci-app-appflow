@@ -2011,22 +2011,170 @@ function m_summary(req) {
 	return r;
 }
 
+/* Application totals restricted to one device.
+ *
+ * The mirror of devices_for_apps(): same bounded flow table, same join already
+ * present on every flow record, grouped the other way. No new aggregate.
+ *
+ * As with that function these are the bytes CURRENTLY TRACKED flows account
+ * for, not the application's lifetime totals, and the reply says so.
+ */
+function apps_for_device(dev, now) {
+	let acc = {};
+
+	for (let dg in flows) {
+		let fr = flows[dg];
+
+		if (!fr || fr.shadow || fr.dev_key != dev || !fr.app_key)
+			continue;
+
+		let e = acc[fr.app_key];
+		if (!e) {
+			e = { key: fr.app_key, cat: fr.cat_key, up: 0, down: 0, flows: 0 };
+			acc[fr.app_key] = e;
+		}
+
+		e.up   += (fr.up ?? 0);
+		e.down += (fr.down ?? 0);
+		e.flows++;
+	}
+
+	let out = [];
+	for (let k in acc) {
+		let e = acc[k];
+		/* Names live on the aggregate, not on the flow, so look the app up. A
+		 * flow whose app has already been pruned from the aggregate still gets
+		 * a row, keyed rather than named, instead of vanishing. */
+		let a = apps[k];
+
+		push(out, {
+			key: k,
+			name: a ? a.name : k,
+			tag: a ? (a.tag ?? k) : k,
+			category: e.cat,
+			upload: e.up,
+			download: e.down,
+			bytes_total: e.up + e.down,
+			flows: e.flows
+		});
+	}
+
+	sort(out, (x, y) => y.bytes_total - x.bytes_total);
+
+	return out;
+}
+
 function m_apps(req) {
 	let now = now_ms();
 	let r = envelope(now);
 	r.window = cfg.rate_window;
-	r.apps = rows_of(apps, app_row, now, req.args?.sort,
-	                 clampi(num(req.args?.limit, LIST_REPLY_MAX), 1, LIST_REPLY_MAX));
+	let lim = clampi(num(req.args?.limit, LIST_REPLY_MAX), 1, LIST_REPLY_MAX);
+	let dev = req.args?.device;
+
+	/* `device` scopes the answer to one device: what is that thing doing. */
+	if (type(dev) == "string" && length(dev)) {
+		let rows = apps_for_device(dev, now);
+
+		r.from_flows = true;
+		r.device = dev;
+		r.total = length(rows);
+		r.apps = (length(rows) > lim) ? slice(rows, 0, lim) : rows;
+
+		return r;
+	}
+
+	r.from_flows = false;
+	r.apps = rows_of(apps, app_row, now, req.args?.sort, lim);
 	r.total = length(apps);
 	return r;
+}
+
+/* Device totals restricted to a set of application keys.
+ *
+ * Computed from the live flow table rather than from a new aggregate. Every
+ * flow already carries dev_key and app_key, so the join is there; the table is
+ * bounded by flow_max, so this is bounded too. No new memory.
+ *
+ * The numbers are what the CURRENTLY TRACKED flows account for, not the
+ * device's lifetime totals: a flow that has ended is no longer here. The reply
+ * carries from_flows so a caller cannot present it as cumulative history.
+ *
+ * Shadow flows are excluded for the same reason they are excluded everywhere
+ * else: they are the NAT-side duplicate and counting them would double.
+ */
+function devices_for_apps(keys, now) {
+	let want = {};
+	for (let k in (keys ?? []))
+		if (type(k) == "string" && length(k))
+			want[k] = true;
+
+	let acc = {};
+	for (let dg in flows) {
+		let fr = flows[dg];
+
+		if (!fr || fr.shadow || !fr.dev_key || !want[fr.app_key])
+			continue;
+
+		let e = acc[fr.dev_key];
+		if (!e) {
+			e = { key: fr.dev_key, mac: fr.dev_mac, ip: fr.dev_ip,
+			      up: 0, down: 0, flows: 0 };
+			acc[fr.dev_key] = e;
+		}
+		if (!e.ip && fr.dev_ip)
+			e.ip = fr.dev_ip;
+
+		e.up   += (fr.up ?? 0);
+		e.down += (fr.down ?? 0);
+		e.flows++;
+	}
+
+	let out = [];
+	for (let k in acc) {
+		let e = acc[k];
+		let pseudo = (k == "router" || k == "multicast" || k == "unknown");
+
+		push(out, {
+			key: k,
+			name: device_name(k, e.mac, e.ip, now),
+			mac: pseudo ? null : e.mac,
+			ip: pseudo ? null : e.ip,
+			upload: e.up,
+			download: e.down,
+			bytes_total: e.up + e.down,
+			flows: e.flows
+		});
+	}
+
+	sort(out, (x, y) => y.bytes_total - x.bytes_total);
+
+	return out;
 }
 
 function m_devices(req) {
 	let now = now_ms();
 	let r = envelope(now);
 	r.window = cfg.rate_window;
-	r.devices = rows_of(devs, dev_row, now, req.args?.sort,
-	                    clampi(num(req.args?.limit, LIST_REPLY_MAX), 1, LIST_REPLY_MAX));
+	let lim = clampi(num(req.args?.limit, LIST_REPLY_MAX), 1, LIST_REPLY_MAX);
+
+	/* `apps` restricts the answer to the devices carrying those applications,
+	 * which is how the UI answers "who is generating this traffic" once the
+	 * user has filtered the application list. Matching stays in the UI, where
+	 * the user's text lives; summing stays here, where the flows are. */
+	let keys = req.args?.apps;
+
+	if (type(keys) == "array" && length(keys)) {
+		let rows = devices_for_apps(keys, now);
+
+		r.from_flows = true;
+		r.total = length(rows);
+		r.devices = (length(rows) > lim) ? slice(rows, 0, lim) : rows;
+
+		return r;
+	}
+
+	r.from_flows = false;
+	r.devices = rows_of(devs, dev_row, now, req.args?.sort, lim);
 	r.total = length(devs);
 	return r;
 }
@@ -2280,8 +2428,13 @@ function ubus_publish(conn) {
 	const SID = { ubus_rpc_session: "" };
 	return conn.publish("appflow", {
 		summary:    { call: m_summary,    args: { limit: 0, ...SID } },
-		apps:       { call: m_apps,       args: { sort: "", limit: 0, ...SID } },
-		devices:    { call: m_devices,    args: { sort: "", limit: 0, ...SID } },
+		/* `device` must be declared or ubus rejects the call outright, which
+		 * presents as the method returning nothing at all. */
+		apps:       { call: m_apps,       args: { sort: "", limit: 0, device: "", ...SID } },
+		/* `apps` is an array of application keys. It MUST be declared here or
+		 * ubus rejects the call outright rather than ignoring the argument,
+		 * which presents as the method returning nothing at all. */
+		devices:    { call: m_devices,    args: { sort: "", limit: 0, apps: [], ...SID } },
 		app_detail: { call: m_app_detail, args: { app: "", ...SID } },
 		flows:      { call: m_flows,      args: { limit: 0, app: "", device: "", ...SID } },
 		stats:      { call: m_stats,      args: { range: "", ...SID } },

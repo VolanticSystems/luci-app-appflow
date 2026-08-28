@@ -39,6 +39,24 @@ const path = require('path');
 // and they are the only thing preventing the file from evaluating as ordinary
 // JavaScript. Replaced with a blank line each so every reported line number
 // still matches the real file.
+// The same String.prototype.format, as SOURCE TEXT, so it can be evaluated
+// inside the vm realm where the module actually runs.
+const FORMAT_SRC = `
+Object.defineProperty(String.prototype, 'format', {
+  value: function () {
+    var args = arguments, i = 0;
+    return this.replace(/%(?:(\d+)\$)?([sdifj%])/g, function (m, pos, kind) {
+      if (kind === '%') return '%';
+      var v = args[pos ? (parseInt(pos, 10) - 1) : i++];
+      if (kind === 'd' || kind === 'i') return String(parseInt(v, 10));
+      if (kind === 'f') return String(parseFloat(v));
+      if (kind === 'j') return JSON.stringify(v);
+      return (v == null) ? '' : String(v);
+    });
+  }
+});
+`;
+
 function stripRequires(src) {
 	return src.replace(/^\s*'require [^']*';\s*$/gm, '');
 }
@@ -123,7 +141,14 @@ function load(file, stubs) {
 		'(function(){\n' + stripRequires(src) + '\n})()',
 		{ filename: path.basename(file) }
 	);
-	const mod = fn.runInNewContext(vm.createContext(sandbox));
+	// vm gives the module its own REALM, with its own String.prototype, so a
+	// polyfill installed in Node's realm does not reach it. Build the context
+	// first, install the LuCI runtime extensions INSIDE it, then evaluate.
+	// Without this, product code calling '%s'.format() throws here while
+	// working perfectly in a browser.
+	const ctx = vm.createContext(sandbox);
+	new vm.Script(FORMAT_SRC, { filename: 'luci-runtime-shim.js' }).runInContext(ctx);
+	const mod = fn.runInContext(ctx);
 
 	// Non-enumerable so it cannot be mistaken for part of the module's own
 	// export surface by a test that iterates the keys.

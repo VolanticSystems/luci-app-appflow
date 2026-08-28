@@ -208,6 +208,141 @@ chk('toList carries the object key into the named field', 'aa:bb', keyed[0] && k
 
 // ---------------------------------------------------------- catalogue
 
+head('FILTER: include, exclude, and the shapes a half-typed term takes');
+
+// WHY THIS GROUP EXISTS. The filter is the only way to make a busy dashboard
+// legible, and the question that produced it was concrete: one streaming
+// session buried everything else and there was no way to look past it.
+//
+// Both views share this logic precisely so they cannot drift, and it lives in
+// common.js rather than inside a render function so a test can reach it at all.
+// The classifier lesson from the sibling package: logic that decides something
+// belongs where Node can load it.
+
+// A term matches the application label, its key, or its category label. Those
+// are the three strings a person could plausibly be typing at.
+const FIELDS = {
+	claude:  [ 'Anthropic (Claude)', 'ai:anthropic-claude', 'AI assistants' ],
+	openai:  [ 'OpenAI', 'ai:openai', 'AI assistants' ],
+	netflix: [ 'Netflix', 'a145', 'Streaming Media' ],
+	http:    [ 'HTTP/S', 'p196', 'Web' ]
+};
+
+const pass = (text, row) => c.matchFilter(c.parseFilter(text), FIELDS[row]);
+
+// An empty filter passes everything. This is the unfiltered case and must not
+// be special-cased by any caller.
+//
+// SABOTAGE: make matchFilter return false for an empty term list. Every view
+// renders an empty table on load, which is as broken as it sounds.
+chk('an empty filter passes everything', [ true, true, true, true ],
+    [ 'claude', 'openai', 'netflix', 'http' ].map((r) => pass('', r)));
+
+// Matching is case-insensitive and matches any of the three fields.
+chk('a term matches the application label', true,  pass('netflix', 'netflix'));
+chk('and is case-insensitive',              true,  pass('NeTfLiX', 'netflix'));
+chk('a term matches the CATEGORY label',    true,  pass('ai assistants', 'claude'));
+chk('a partial category matches',           true,  pass('ai', 'claude'));
+chk('a term matches the internal key',      true,  pass('p196', 'http'));
+chk('a term that matches nothing excludes', false, pass('netflix', 'claude'));
+
+// EXCLUSION. This is the case the whole feature exists for: "show me
+// everything except the thing that is burying the view". An include-only
+// filter cannot express it, because you would have to already know what you
+// wanted to keep.
+//
+// SABOTAGE: drop the leading-minus branch in parseFilter so '-netflix' is
+// treated as an ordinary term. The two checks below invert.
+chk('a minus term removes the row it matches',  false, pass('-netflix', 'netflix'));
+chk('and leaves every other row alone',         true,  pass('-netflix', 'claude'));
+
+// Terms combine with AND, so each one narrows. Mixing include and exclude is
+// the useful case: this category, except that member of it.
+//
+// SABOTAGE: change every() to some() in matchFilter. The first goes true.
+chk('include and exclude combine',        false, pass('ai -claude', 'claude'));
+chk('and the combination still includes', true,  pass('ai -claude', 'openai'));
+chk('two includes both have to match',    false, pass('ai netflix', 'claude'));
+
+// A bare '-' is what a half-typed exclusion looks like. Treating it as
+// "exclude everything" would blank the table between two keystrokes.
+//
+// SABOTAGE: remove the final filter() in parseFilter that drops empty terms.
+chk('a bare minus is ignored, not treated as exclude-all',
+    [ true, true ], [ pass('-', 'claude'), pass('-', 'netflix') ]);
+chk('and so is stray whitespace', true, pass('   ', 'claude'));
+
+// Nulls and absent fields must not throw: a row can legitimately have no
+// category, and normApp fills what it can.
+//
+// SABOTAGE: drop the null guard in matchFilter's field join.
+chk('a row with missing fields does not throw', false,
+    c.matchFilter(c.parseFilter('claude'), [ null, undefined, '' ]));
+chk('and still matches on the field it does have', true,
+    c.matchFilter(c.parseFilter('claude'), [ null, 'Anthropic (Claude)', undefined ]));
+
+head('DEVICE IDENTITY: the key the drill-down is addressed by');
+
+// normDevice DROPPED the daemon's device key. Every call site that needed it
+// got undefined, so clicking a device cleared the selection instead of setting
+// it: no error, no effect, a feature that looked wired and was not. Three bugs
+// in one evening had that exact shape.
+//
+// SABOTAGE: remove `t.key = ...` from normDevice. This goes red and nothing
+// else does, which is precisely why it had to be added.
+{
+	const d = c.normDevice({ key: 'b4:2e:99:3a:d6:df', mac: 'b4:2e:99:3a:d6:df',
+	                         ip: '192.168.72.20', name: 'Stang', bytes_total: 10 });
+
+	chk('normDevice carries the daemon key through', 'b4:2e:99:3a:d6:df', d.key);
+	chk('and still carries name, mac and ip', [ 'Stang', 'B4:2E:99:3A:D6:DF', '192.168.72.20' ],
+	    [ d.name, d.mac, d.ip ]);
+}
+
+// The pseudo-devices have no MAC at all, so a fallback to mac/ip would leave
+// them unaddressable. The daemon's key is what they are called.
+//
+// SABOTAGE: change the key preference order so mac wins over key.
+{
+	const d = c.normDevice({ key: 'router', name: 'Router', bytes_total: 5 });
+
+	chk('a pseudo-device is addressed by its key', 'router', d.key);
+}
+
+head('CLICKABLE CELLS: a label that names a thing is a way to see it');
+
+// appCell and deviceCell take an onPick callback. Without one they render
+// exactly as before, so nothing that does not want the behaviour gets it.
+//
+// SABOTAGE: make appCell add af-pick unconditionally. The first check goes red,
+// and every table that never wanted click targets grows them.
+{
+	const plain = c.appCell({ label: 'Netflix', key: 'a145', cat: 'streaming-media' });
+	chk('without a callback an app cell is not clickable',
+	    false, /af-pick/.test(JSON.stringify(plain)));
+
+	const picked = [];
+	const live = c.appCell({ label: 'Netflix', key: 'a145', cat: 'streaming-media' },
+	                       null, (v) => picked.push(v));
+	chk('with a callback it is', true, /af-pick/.test(JSON.stringify(live)));
+}
+
+// A device cell with a callback is clickable and passes the whole device
+// object, because the caller needs both the key (to query) and the name (to
+// show in the chip).
+//
+// SABOTAGE: have deviceCell pass dev.name instead of dev. The drill-down then
+// queries by name, which is not what the daemon keys on.
+{
+	const plain = c.deviceCell({ name: 'Stang', mac: 'B4:2E:99:3A:D6:DF', key: 'b4:2e' });
+	chk('without a callback a device cell is not clickable',
+	    false, /af-pick/.test(JSON.stringify(plain)));
+
+	const live = c.deviceCell({ name: 'Stang', mac: 'B4:2E:99:3A:D6:DF', key: 'b4:2e' },
+	                          () => {});
+	chk('with a callback it is', true, /af-pick/.test(JSON.stringify(live)));
+}
+
 head('THE STRING CATALOGUE COVERS WHAT THE CODE ASKS FOR');
 
 // SABOTAGE: add a `_('some new string')` anywhere in common.js without
