@@ -179,13 +179,13 @@ number hides cap pressure underneath normal behaviour.
 
 ## Tests
 
-Three suites, 117 checks, no failures. Two need a sandbox router; one needs
+Three suites, 126 checks, no failures. Two need a sandbox router; one needs
 nothing but Node and runs on every push.
 
 | suite | checks | what it does |
 |---|---|---|
 | `tests/frontend-suite.js` | 31 | loads the real view code under Node. Mostly regression tests for defects that shipped. |
-| `tests/protocol-suite.sh` | 71 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
+| `tests/protocol-suite.sh` | 75 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
 | `tests/hardware-suite.sh` | 15 | drives real traffic and compares against the client interface's own counter in `/sys/class/net`, which nothing in this daemon can influence. |
 
 Every check names, in a comment written before the assertion, the smallest

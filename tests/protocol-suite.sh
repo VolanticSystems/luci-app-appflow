@@ -1248,6 +1248,36 @@ test_ai_breakout() {
 		ok "the daemon survived the hostile hostname batch and still reports"
 	fi
 
+	head2 "AI BREAKOUT: the upgrade path, where the option is absent"
+
+	# THE UPGRADE PATH. apk treats /etc/config/appflow as a configuration file
+	# and leaves an existing one alone, so a config written by a version before
+	# this feature existed has no ai_breakout line at all. That is what every
+	# upgrading router has, which makes it the COMMON case, and it was the one
+	# case this group did not cover: the checks above set the option explicitly
+	# to 1, and the off-switch check sets it explicitly to 0.
+	#
+	# CFG_DEFAULTS says 1 and the daemon comment says "Absent means ON". This is
+	# the check that makes that true rather than merely claimed.
+	#
+	# SABOTAGE: change CFG_DEFAULTS.ai_breakout to 0, or make load_config() treat
+	# a missing value as off. Both go red here and nowhere else, because every
+	# other check in this file states the option explicitly.
+	uci delete appflow.main.ai_breakout 2>/dev/null
+	uci commit appflow
+	chk "the option really is absent (fixture guard)" "" "$(uci -q get appflow.main.ai_breakout)"
+
+	{
+		hello
+		ai_flow AI000040 0 "" "api.anthropic.com" 300 300 600
+	} > "$EV"
+	feed_and_settle
+
+	chk "with no ai_breakout option at all, the feature is ON" \
+	    "1" "$(field flows ai_labeled)"
+	chk "and the vendor is labelled" "YES" "$(app_present 'Anthropic (Claude)')"
+	chk "status reports the default as enabled" "1" "$(field config ai_breakout)"
+
 	head2 "AI BREAKOUT: the off switch"
 
 	# A user who does not want an asserted classification must be able to turn
