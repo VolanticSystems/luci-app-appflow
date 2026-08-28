@@ -113,7 +113,7 @@ accounting `local_bytes`/`other_bytes` from the purge event itself.
   plugin architecture, all behavior here is pinned to 4.4.7-as-packaged.
 - netifyd bundles its own nDPI statically: `libndpi` is NOT a dependency.
 
-### 2.5 Byte-attribution behaviour (measured 2026-08-22)
+### 2.5 Byte-attribution behavior (measured 2026-08-22)
 
 Three questions about where bytes land were settled on the bench (EA8500,
 netifyd 4.4.7). **Method matters here:** all earlier attempts were confounded by
@@ -289,7 +289,7 @@ to 16, and the warning fired.
 it would have been invisible: caching the snapshot for 2 s meant new flows,
 which are exactly the ones needing classification, usually missed it. It looked
 like it worked (totals were right, because everything got shadowed) while
-silently degrading to the no-conntrack behaviour with conntrack fully available.
+silently degrading to the no-conntrack behavior with conntrack fully available.
 `unresolved: 20` against `router_local: 0` was the tell.
 
 ---
@@ -425,7 +425,7 @@ the dashboard looks healthy at exactly the moment it has become incomplete.
 `flows.shed` counts evictions caused by **cap pressure**, separately from
 `flows.pruned`, which is ordinary idle housekeeping and is expected to be
 large. They shared one counter until 2026-08-26, so cap pressure was invisible
-underneath normal behaviour.
+underneath normal behavior.
 
 **`flows.dropped` is a genuine last-resort backstop and reads 0 in practice.**
 `flow_new()` increments it only if the table is still full *after*
@@ -508,7 +508,7 @@ luci-app-appflow/
 ├── root/usr/sbin/appflowd            # ucode daemon (shebang /usr/bin/ucode)
 ├── root/usr/share/rpcd/acl.d/luci-app-appflow.json
 ├── root/usr/share/luci/menu.d/luci-app-appflow.json
-├── po/templates/appflow.pot          # string catalogue, GENERATED from source
+├── po/templates/appflow.pot          # string catalog, GENERATED from source
 ├── tests/protocol-suite.sh           # 54 checks, fake agent, no traffic needed
 ├── tests/hardware-suite.sh           # 15 checks, real traffic vs wire truth
 ├── tests/frontend-suite.js           # 31 checks, Node, runs in CI
@@ -663,7 +663,7 @@ The `stats`/`app_detail` range views use `download/upload/total`, which is the
 conventional vocabulary for that screen. `status` is nested
 (`socket.*`, `flows.*`, `aggregates.*`, `agent.*`, `memory.*`).
 `app_detail` takes the aggregate `key` or the raw tag or the display
-label (resolver tries all three). The frontend ships normalisers for
+label (resolver tries all three). The frontend ships normalizers for
 both dialects in `view/appflow/common.js`. luci-lib-chartjs was dropped:
 the packaged build is a Chart.js 1.x fragment (Doughnut/Pie only), and
 inline SVG follows LuCI theme variables, which canvas cannot.
@@ -691,7 +691,7 @@ all. The identifying data was there the whole time; nothing was making use of
 it.
 
 The daemon is the right layer because aggregation happens there. The browser
-only ever receives summarised rows, so a frontend fix would arrive after the
+only ever receives summarized rows, so a frontend fix would arrive after the
 decision that matters had already been made.
 
 ### 11.3 What it does
@@ -725,7 +725,7 @@ Nothing here pretends to have come from netifyd.
 `detected_application` is 0, with one exception: entries flagged `strong`,
 which override even a positive identification.
 
-`strong` is set only where netifyd is known to recognise the PARENT brand and
+`strong` is set only where netifyd is known to recognize the PARENT brand and
 would otherwise swallow the AI service inside it: Gemini reported as Google,
 Copilot as GitHub, Qwen as Alibaba. Everywhere else the rule is conservative,
 which means **the day Netify ship AI signatures this table falls silent by
@@ -752,7 +752,7 @@ containing AI flows for precisely this reason.
 
 - **This is hostname matching, not DPI.** It asserts a classification netifyd
   did not make. The technique is legitimate, matching the SNI is what netifyd
-  itself does for HTTP/S, but the honest description is "we recognise the
+  itself does for HTTP/S, but the accurate description is "we recognize the
   name", never "we inspected the protocol".
 - **The list rots.** New services appear constantly and nothing here updates
   itself. `option ai_breakout '0'` turns it off entirely.
@@ -899,7 +899,7 @@ up, no error, no effect.
 
 None of these are catchable by a test of logic, because in each case the logic
 was right and the wire was not connected. They were found by driving the page.
-That is the honest limit of this package's test strategy and it is written here
+That is the limit of this package's test strategy and it is written here
 rather than left implicit.
 
 ### 14.6 One ACL grant was widened, deliberately

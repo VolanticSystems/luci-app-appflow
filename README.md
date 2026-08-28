@@ -7,7 +7,7 @@ right now, by application?* Netflix vs. YouTube vs. a Windows update, broken
 down per device, live in LuCI, built entirely on open components.
 
 > Status: **working, published as a demonstration project.** Developed and
-> tested on real hardware, with byte-attribution behaviour measured rather than
+> tested on real hardware, with byte-attribution behavior measured rather than
 > assumed. Read *Known limitations* below before installing: several are
 > inherent to the DPI engine, and one affects anyone who restarts the service.
 > Not currently in the OpenWrt feeds, so it must be built from source.
@@ -84,6 +84,11 @@ Statistics (past hour):
 
 ![Statistics](docs/statistics.png)
 
+Filtering. Typing `ai` narrows both lists to AI traffic, and the device panel
+switches to what currently-tracked flows account for:
+
+![Filtering by AI](docs/ai-filter.png)
+
 ## AI services get their own rows
 
 netifyd cannot classify AI traffic and will not soon. Its signature set is
@@ -98,7 +103,7 @@ infrastructure (aggregators, inference APIs, GPU rental, vector stores).
 
 **This is hostname matching, not DPI, and it is labelled as such.** It asserts
 a classification netifyd did not make. netifyd's own answer always wins except
-for a handful of services whose parent brand it recognises and would otherwise
+for a handful of services whose parent brand it recognizes and would otherwise
 swallow (Gemini under Google, Copilot under GitHub), so the table falls silent
 by itself if Netify ever ship AI signatures.
 
@@ -131,7 +136,7 @@ click is visible, editable and clearable rather than a hidden mode.
 
 **Click a device to see what it is doing.** The application list then shows only
 that device's traffic and a chip appears naming it. The device list has its own
-filter box matching name, MAC and IP, with the same minus-to-exclude behaviour.
+filter box matching name, MAC and IP, with the same minus-to-exclude behavior.
 
 Both filters compose: pick a device, then type `-netflix`, and you get that
 device's traffic minus streaming.
@@ -152,7 +157,7 @@ is the unbounded state this design avoids on purpose.
 ## Teaching it a service it does not know
 
 netifyd's signature set is vendor data and it goes stale: the copy shipped with
-OpenWrt is dated August 2023. AppFlow recognises services by the server name
+OpenWrt is dated August 2023. AppFlow recognizes services by the server name
 their TLS connections announce, and you can add to that list yourself without
 touching any code.
 
@@ -173,7 +178,7 @@ then `/etc/init.d/appflowd restart`. Traffic to `www.torproject.org` and
 | `suffix` | matched against the last two, three or four labels of the server name, anchored on a label boundary. Must contain a dot. |
 | `name` | what appears in the application list. |
 | `category` | what appears in the category breakdown. Free text; reuse an existing one to group with it, or invent your own. |
-| `strong` | optional, default `0`. `0` fills a gap only, leaving netifyd's own identification alone where it has one. `1` overrides netifyd too, for when it recognises a parent brand and swallows the service inside it. |
+| `strong` | optional, default `0`. `0` fills a gap only, leaving netifyd's own identification alone where it has one. `1` overrides netifyd too, for when it recognizes a parent brand and swallows the service inside it. |
 
 **The same section overrides a built-in entry**, so this is also how you correct
 one that is wrong for your network:
@@ -237,8 +242,13 @@ left to be discovered. Details and supporting measurements are in
   identifies a flow only after several packets, bytes counted before that point
   are not retroactively moved, because the accounting path is deliberately
   append-only. Not observed in practice and currently unquantified.
+- **Flow offloading is untested.** appflow has not been run on a router with
+  software or hardware flow offloading enabled. netifyd captures packets on the
+  interface rather than through netfilter, so the two paths are not obviously
+  in conflict, but that is reasoning and not a measurement, and no measurement
+  has been made. Reports from anyone running offloading are welcome.
 - **Detection quality is netifyd's, not ours.** Which applications are
-  recognised, and how accurately, is a property of the DPI engine and its
+  recognized, and how accurately, is a property of the DPI engine and its
   signature data. appflow reports what netifyd detects.
 - **This inspects traffic.** Consider whether deep packet inspection is
   appropriate on your network, and for the people using it, before installing.
@@ -262,7 +272,7 @@ Three fields there answer most questions:
 
 `flows.shed` is counted separately from `flows.pruned`, which is ordinary
 housekeeping of idle flows and is expected to be large. Reading them as one
-number hides cap pressure underneath normal behaviour.
+number hides cap pressure underneath normal behavior.
 
 ## Tests
 
