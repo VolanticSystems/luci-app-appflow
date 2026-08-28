@@ -545,7 +545,9 @@ Depends (from `Makefile` `LUCI_DEPENDS`): `netifyd`, `luci-base`,
 
 ## 8. Risks / open items
 
-- ~~UI reference spec~~, landed 2026-08-21, §4 locked.
+- ~~UI reference spec~~, landed 2026-08-21. It lived here as section 4 and
+  now lives in [frontend.md](frontend.md); the numbering below still skips
+  4 rather than renumber every cross-reference in this file.
 - ~~netifyd conf details~~, landed: multi-client listen socket, `dump_established_flows`,
   `flow_stats` cadence config. Purge event confirmed as `flow_purge` (extracted from the netifyd binary, 2026-08-21).
 - ~~ucode `publish()` reliability → decides §3 option A/B~~: resolved, §3
