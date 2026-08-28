@@ -266,14 +266,20 @@ number hides cap pressure underneath normal behaviour.
 
 ## Tests
 
-Three suites, 178 checks, no failures. Two need a sandbox router; one needs
+Three suites, 179 checks, no failures. Two need a sandbox router; one needs
 nothing but Node and runs on every push.
 
 | suite | checks | what it does |
 |---|---|---|
 | `tests/frontend-suite.js` | 59 | loads the real view code under Node. Mostly regression tests for defects that shipped. |
 | `tests/protocol-suite.sh` | 104 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
-| `tests/hardware-suite.sh` | 15 | drives real traffic and compares against the client interface's own counter in `/sys/class/net`, which nothing in this daemon can influence. |
+| `tests/hardware-suite.sh` | 16 | drives real traffic and compares against the client interface's own counter in `/sys/class/net`, which nothing in this daemon can influence. |
+
+Two of the hardware checks SKIP, loudly and counted, when the router cannot
+support them: when netifyd is not capturing every default-route interface a
+wire-ratio comparison is meaningless rather than merely weak, and the
+purge-rate check needs more flows than a quiet bench produces. A skipped
+check is reported as skipped, never as a pass.
 
 Every check names, in a comment written before the assertion, the smallest
 edit to the *product* that turns it red, and those sabotages are actually
