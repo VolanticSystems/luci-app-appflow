@@ -112,6 +112,43 @@ it cannot do: match a service behind a shared CDN hostname, and survive ECH,
 which encrypts the SNI. netifyd has the same ECH exposure. Detail in
 [docs/DESIGN.md](docs/DESIGN.md) section 11.
 
+## Finding things in a busy dashboard
+
+One streaming session can bury everything else, so both lists filter.
+
+**Type to narrow.** The box above the application list matches the application
+name, its internal key and its category, so `ai` finds every AI service and
+`streaming` finds every streaming one.
+
+**Prefix a word with a minus to exclude it.** `-netflix` shows everything
+except Netflix, which is the case a search box alone cannot express: to use it
+you would have to already know what you wanted to keep. Terms combine, so
+`ai -claude` is AI traffic that is not Claude.
+
+**Click anything that names something.** A category in the Categories panel, an
+application name, or the category under it: each fills the filter box, so the
+click is visible, editable and clearable rather than a hidden mode.
+
+**Click a device to see what it is doing.** The application list then shows only
+that device's traffic and a chip appears naming it. The device list has its own
+filter box matching name, MAC and IP, with the same minus-to-exclude behaviour.
+
+Both filters compose: pick a device, then type `-netflix`, and you get that
+device's traffic minus streaming.
+
+### What the numbers mean when you drill in
+
+A device drill-down is computed from the live flow table, not from a stored
+per-device-per-application history, so the columns change from **Download and
+Upload rates** to **Downloaded and Uploaded bytes** and the caption says
+"from flows in progress". Those are the bytes currently-tracked flows account
+for: a connection that has already finished is no longer in the table.
+
+That is a real limitation and it is why the headings change rather than leaving
+a byte figure sitting under a column promising a rate. Producing a genuine
+per-device-per-application *rate* would need a delta ring for every pair, which
+is the unbounded state this design avoids on purpose.
+
 ## Teaching it a service it does not know
 
 netifyd's signature set is vendor data and it goes stale: the copy shipped with
@@ -229,13 +266,13 @@ number hides cap pressure underneath normal behaviour.
 
 ## Tests
 
-Three suites, 138 checks, no failures. Two need a sandbox router; one needs
+Three suites, 178 checks, no failures. Two need a sandbox router; one needs
 nothing but Node and runs on every push.
 
 | suite | checks | what it does |
 |---|---|---|
-| `tests/frontend-suite.js` | 31 | loads the real view code under Node. Mostly regression tests for defects that shipped. |
-| `tests/protocol-suite.sh` | 87 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
+| `tests/frontend-suite.js` | 59 | loads the real view code under Node. Mostly regression tests for defects that shipped. |
+| `tests/protocol-suite.sh` | 104 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
 | `tests/hardware-suite.sh` | 15 | drives real traffic and compares against the client interface's own counter in `/sys/class/net`, which nothing in this daemon can influence. |
 
 Every check names, in a comment written before the assertion, the smallest

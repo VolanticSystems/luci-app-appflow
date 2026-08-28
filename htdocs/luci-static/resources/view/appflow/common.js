@@ -31,9 +31,20 @@ function declare(method, params) {
 	});
 }
 
-/* §5 also defines `apps` and `flows`; neither v1 view needs them, so they are
- * intentionally not bound here -- and as of 2026-08-25 the rpcd ACL does not
- * grant them either. A security audit pointed out that this comment was the
+/* §5 also defines `apps` and `flows`.
+ *
+ * `apps` IS bound as of 2026-08-28, because the overview grew a device
+ * drill-down: clicking a device asks what that device is doing, and the answer
+ * is `apps {device}`. Bound here AND granted in the ACL, in that order, exactly
+ * as the note below required.
+ *
+ * That call returns an AGGREGATE per (device, application) computed from the
+ * live flow table. It is more revealing than either list alone, since it says
+ * which device is using which application, and it is still far short of
+ * `flows`: no remote address, no port, no per-connection record. `flows`
+ * remains unbound and ungranted.
+ *
+ * The original note, which still governs `flows`: A security audit pointed out that this comment was the
  * evidence: the frontend had been deliberately narrowed and the boundary file
  * had not, so an account restricted to this package alone could still call
  * `flows` directly through /cgi-bin/luci/admin/ubus. That one matters more than
@@ -44,7 +55,13 @@ function declare(method, params) {
  * `params` is positional: callStats('hour'), callDetail('a10465'). */
 var callStatus  = declare('status'),
     callSummary = declare('summary'),
-    callDevices = declare('devices'),
+    /* positional: devices(sort, limit, apps). `apps` restricts the answer to
+     * the devices carrying those application keys, which is how the overview
+     * answers "who is generating this traffic" once the user has filtered. */
+    callDevices = declare('devices', [ 'sort', 'limit', 'apps' ]),
+    /* positional: apps(sort, limit, device). `device` scopes the answer to
+     * one device, which is the overview's drill-down. */
+    callApps    = declare('apps', [ 'sort', 'limit', 'device' ]),
     callStats   = declare('stats', [ 'range' ]),
     callDetail  = declare('app_detail', [ 'app' ]),
     callReset   = declare('reset');
@@ -232,6 +249,11 @@ rect.af-col.af-ul{fill:var(--success-color-high)}\
 .af-key strong{font-size:12px}\
 .af-dot{display:inline-block;width:9px;height:9px;border-radius:2px;flex:0 0 9px}\
 .af-donut-wrap{display:flex;align-items:center;gap:1.2em;flex-wrap:wrap}\
+.af-pick{cursor:pointer;border-radius:3px}\n.af-pick:hover,.af-pick:focus{background:var(--background-color-medium);outline:none}\n.af-chipbar{margin:0 0 .5em}\n.af-chip{display:inline-flex;align-items:center;gap:.5em;padding:.15em .6em;border-radius:12px;background:var(--background-color-medium);font-size:12px}\n.af-chip-x{text-decoration:none;font-weight:bold;opacity:.7}\n.af-chip-x:hover{opacity:1}\
+.af-pick:hover,.af-pick:focus{background:var(--background-color-medium);outline:none}\
+.af-filter{display:flex;gap:.5em;align-items:center;margin:0 0 .6em}\
+.af-filter input{flex:1 1 auto;min-width:8em}\
+.af-filter-note{font-size:11px;opacity:.75}\
 .af-donut{position:relative;width:128px;height:128px;flex:0 0 128px}\
 .af-donut > svg{display:block;width:100%;height:100%}\
 .af-donut-track{stroke:var(--background-color-medium)}\
@@ -293,6 +315,7 @@ return baseclass.extend({
 		status: callStatus,
 		summary: callSummary,
 		devices: callDevices,
+		apps: callApps,
 		stats: callStats,
 		detail: callDetail,
 		reset: callReset
@@ -419,6 +442,16 @@ return baseclass.extend({
 		    mac = this.str(raw, A_MAC),
 		    ip = this.str(raw, A_IP);
 
+		/* The daemon's own device key, carried through because the overview
+		 * drills into a device by it. It was dropped here, so dev.key was
+		 * undefined at the call site and the drill-down silently did nothing:
+		 * no error, no effect, a feature that looked wired and was not.
+		 *
+		 * Falls back to mac/ip so a row always has something to identify it,
+		 * but the daemon's key is preferred: it is what the pseudo-devices
+		 * (router, multicast, unknown) are addressed by, and those have no
+		 * MAC at all. */
+		t.key = this.str(raw, [ 'key', 'device', 'id' ], mac || ip || '');
 		t.mac = mac.toUpperCase();
 		t.ip = ip;
 		t.name = this.str(raw, A_DNAM, ip || mac || _('Unknown device'));
@@ -706,22 +739,48 @@ return baseclass.extend({
 		return node;
 	},
 
-	appCell: function(app, sub) {
-		var second = (sub != null) ? sub : this.subLabel(app);
+	/* `onPick` makes the application name and its category sub-label clickable,
+	 * each filtering to itself. Everything visible that names a thing should be
+	 * a way to see only that thing; a label that looks like a link and is not
+	 * is worse than plain text. */
+	appCell: function(app, sub, onPick) {
+		var second = (sub != null) ? sub : this.subLabel(app),
+		    pick = (typeof onPick === 'function') ? onPick : null;
+
+		var mk = function(cls, text, value) {
+			var a = { 'class': cls, 'title': text };
+
+			if (pick && value) {
+				a['class'] += ' af-pick';
+				a.title = _('Show only %s').format(value);
+				a.click = function(ev) { ev.preventDefault(); pick(value); };
+			}
+
+			return E('span', a, [ text ]);
+		};
 
 		/* Colour seed: the category when the payload carries one, so every app
 		 * in a category shares a tile colour; the stable app key otherwise. */
 		return E('div', { 'class': 'af-app' }, [
 			this.tile(app.label, app.cat || app.key || app.label, app.tag),
 			E('div', { 'class': 'af-appname' }, [
-				E('span', { 'class': 'af-applabel', 'title': app.label }, [ app.label ]),
-				second ? E('span', { 'class': 'af-sub', 'title': second }, [ second ]) : ''
+				mk('af-applabel', app.label, app.label),
+				second ? mk('af-sub', second, this.catLabel(app.cat) === second ? second : null) : ''
 			])
 		]);
 	},
 
-	deviceCell: function(dev) {
-		return E('div', { 'class': 'af-app' }, [
+	deviceCell: function(dev, onPick) {
+		var pick = (typeof onPick === 'function') ? onPick : null,
+		    attrs = { 'class': 'af-app' };
+
+		if (pick) {
+			attrs['class'] += ' af-pick';
+			attrs.title = _('Show what %s is doing').format(dev.name);
+			attrs.click = function(ev) { ev.preventDefault(); pick(dev); };
+		}
+
+		return E('div', attrs, [
 			this.tile(dev.name, dev.mac || dev.name),
 			E('div', { 'class': 'af-appname' }, [
 				E('span', { 'class': 'af-applabel', 'title': dev.name }, [
@@ -1010,6 +1069,54 @@ return baseclass.extend({
 	 * Doughnut. Pure SVG using stroke-dasharray on an r=15.91549 circle
 	 * (circumference 100), so each slice length is literally its percentage.
 	 */
+	/* ------------------------------------------------------------ filter */
+
+	/* Parse a filter string into terms.
+	 *
+	 * Space separated, and EVERY term must pass, so terms narrow rather than
+	 * widen. A leading minus excludes:
+	 *
+	 *   ai              only rows matching "ai"
+	 *   -netflix        everything except Netflix
+	 *   ai -claude      AI rows that are not Claude
+	 *
+	 * Exclusion exists because the question that prompted this was "one
+	 * streaming session is burying everything else", and an include-only
+	 * filter cannot express it: you would have to know in advance what you
+	 * wanted to keep.
+	 *
+	 * A bare "-" is dropped rather than treated as excluding everything, which
+	 * is what a half-typed term looks like.
+	 */
+	parseFilter: function(text) {
+		return String(text == null ? '' : text).toLowerCase()
+			.split(/\s+/)
+			.filter(function(t) { return t.length > 0; })
+			.map(function(t) {
+				return (t.charAt(0) === '-')
+					? { neg: true,  term: t.slice(1) }
+					: { neg: false, term: t };
+			})
+			.filter(function(t) { return t.term.length > 0; });
+	},
+
+	/* Does a row pass? `fields` are the strings the user could reasonably be
+	 * typing at: an application label, its key, its category.
+	 *
+	 * An empty term list passes everything, which is the unfiltered case and
+	 * must not be special-cased anywhere else. */
+	matchFilter: function(terms, fields) {
+		var hay = (fields || [])
+			.filter(function(f) { return f != null && f !== ''; })
+			.join(' ').toLowerCase();
+
+		return (terms || []).every(function(t) {
+			var hit = hay.indexOf(t.term) >= 0;
+
+			return t.neg ? !hit : hit;
+		});
+	},
+
 	donut: function(slices, opts) {
 		opts = opts || {};
 
@@ -1050,8 +1157,30 @@ return baseclass.extend({
 				off -= pct;
 			});
 
+		/* The legend is the category list, and when the caller supplies
+		 * opts.onPick it is also how you drill into one. Clicking a category
+		 * was the gesture a user reached for first and it did nothing, which
+		 * is the whole reason this argument exists. */
 		var legend = slices.map(function(s) {
-			return E('li', {}, [
+			var attrs = { 'class': 'af-legend-row' };
+
+			if (typeof opts.onPick === 'function' && s.pick != null) {
+				attrs['class'] += ' af-pick';
+				attrs.tabindex = '0';
+				attrs.role = 'button';
+				attrs.title = _('Show only %s').format(s.label);
+				attrs.click = function(ev) { ev.preventDefault(); opts.onPick(s.pick); };
+				/* Keyboard parity: a click target that only responds to a mouse
+				 * is not a control, it is a trap for anyone using a keyboard. */
+				attrs.keydown = function(ev) {
+					if (ev.key === 'Enter' || ev.key === ' ') {
+						ev.preventDefault();
+						opts.onPick(s.pick);
+					}
+				};
+			}
+
+			return E('li', attrs, [
 				E('span', { 'class': 'af-dot', 'style': 'background:' + s.color }),
 				E('span', { 'class': 'af-legend-lbl', 'title': s.label }, [ s.label ]),
 				E('span', { 'class': 'af-legend-val af-num' }, [

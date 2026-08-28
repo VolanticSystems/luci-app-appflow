@@ -822,3 +822,92 @@ and it does nothing today.
 
 None of these were held for 1.1.0: bolting a new interaction model onto the
 statistics view at the end of a release is how a release slips or breaks.
+
+## 14. Filtering and the drill-down
+
+### 14.1 Where the logic lives, and why
+
+`parseFilter()` and `matchFilter()` are in `common.js`, not inside either
+view's render function. Both views share them so the two cannot drift, and Node
+can load `common.js`, so the filter is covered by `tests/frontend-suite.js`
+rather than by looking at a browser. The sibling package learned the same
+lesson the same week: logic that decides something belongs where a test can
+reach it.
+
+Terms are space separated and every one must pass, so terms narrow. A leading
+minus excludes. Exclusion is not decoration: the question that produced this
+feature was "one streaming session is burying everything else", and an
+include-only filter cannot express it, because you would have to already know
+what you wanted to keep.
+
+A bare `-` is dropped rather than treated as exclude-all, because that is what
+a half-typed term looks like and blanking the table between two keystrokes is
+not acceptable.
+
+### 14.2 Fetching past the top-N cut
+
+The overview asks the daemon for `FETCH_LIMIT` (50) application rows and
+displays `TOP_APPS` (8). The extra rows are the filter's raw material. Without
+them, filtering a top-10 list to "AI" returns nothing the moment a streaming
+session pushes AI out of the top 10, which looks broken and is worse than
+having no filter at all.
+
+### 14.3 The drill-down needs no new aggregate
+
+Both directions are one pass over the live flow table:
+
+    devices_for_apps(keys)   which devices carry these applications
+    apps_for_device(dev)     which applications is this device using
+
+Every flow record already carries `dev_key`, `app_key` and `cat_key`, so the
+join exists on every flow, and the table is already bounded by `flow_max`. No
+new storage.
+
+**This was first answered wrongly.** The initial response was that it required
+a per-device-per-application aggregate and was therefore a bounded-memory
+design question. Checking the flow record disproved that in two minutes. The
+episode is recorded because the shape of the mistake matters more than the
+mistake: an architectural-sounding objection offered instead of a two-minute
+check.
+
+### 14.4 Attributed bytes, not lifetime counters
+
+Both functions sum `fr.up + fr.down`, the bytes appflow attributed, and never
+`fr.total`, which is netifyd's lifetime counter for the connection. A stub flow
+adopted mid-transfer has a large lifetime and small attributed bytes, so the
+two differ exactly where it matters.
+
+The test fixture carries one flow with a lifetime of 9000 against 1000
+attributed, for one reason: without it every flow had the two equal, summing
+the wrong field was invisible, and the sabotage for that check passed against
+broken code.
+
+### 14.5 Three bugs of one shape
+
+Getting this working produced three defects that presented identically: wired
+up, no error, no effect.
+
+- **`null` for a string ubus argument.** ubus rejects it with code 2 rather
+  than treating it as absent, and `L.resolveDefault` swallowed the rejection.
+- **The poll repainted over the filtered result.** A side call filtered the
+  device card and the next five-second poll overwrote it. Filtering is view
+  state, so every fetch carries it rather than one special path.
+- **`normDevice` dropped the daemon's `key`.** Clicking a device passed
+  `undefined`, which *cleared* the selection instead of setting it.
+
+None of these are catchable by a test of logic, because in each case the logic
+was right and the wire was not connected. They were found by driving the page.
+That is the honest limit of this package's test strategy and it is written here
+rather than left implicit.
+
+### 14.6 One ACL grant was widened, deliberately
+
+`apps` was unbound in the frontend and ungranted in the ACL after an August
+security review. The device drill-down needs it, so it was bound and granted,
+in that order, exactly as that review's own note required.
+
+`apps {device}` returns an aggregate per device and application from the live
+flow table. It is more revealing than either list alone, since it says which
+device used which application, and it is still far short of `flows`: no remote
+address, no port, no per-connection record. **`flows` remains unbound and
+ungranted.**

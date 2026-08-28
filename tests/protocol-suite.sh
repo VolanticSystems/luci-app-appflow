@@ -1465,6 +1465,147 @@ HMEOF
 	rm -f /tmp/appflow.hostmap.keep
 }
 
+test_drilldown() {
+	head2 "DRILL-DOWN: device <-> application, from the live flow table"
+
+	# WHY THIS EXISTS. "Who is using the bandwidth" was answerable and "what is
+	# that thing doing" was not. Both answers are one pass over the flow table,
+	# which already carries dev_key, app_key and cat_key on every record, so
+	# neither needed a new aggregate. That was worth checking rather than
+	# assuming: the first answer given was that it required a per-device
+	# per-application table and was therefore a memory design question. It did
+	# not, and the check took two minutes.
+	#
+	# Both directions report what CURRENTLY TRACKED flows account for, not
+	# lifetime totals, because a flow that has ended is no longer in the table.
+	# Every reply carries from_flows so a view cannot present one as the other.
+
+	# Two devices, three applications, byte totals chosen so no two sums
+	# coincide and every assertion below is a distinct number.
+	#
+	#   dev A (02:00:00:00:00:aa)  app 4001  local 1000 other 2000  = 3000
+	#   dev A                      app 4002  local  100 other  200  =  300
+	#   dev B (02:00:00:00:00:bb)  app 4001  local   10 other   20  =   30
+	#
+	#   app 4001 spans BOTH devices        -> 3030
+	#   dev A spans BOTH applications      -> 3300
+	dev_flow() {
+		printf '{"type":"flow","internal":true,"interface":"br-lan","flow":{"digest":"%s","local_ip":"192.168.9.%s","local_mac":"%s","other_ip":"93.184.216.34","other_mac":"02:00:00:00:00:ff","local_port":40001,"other_port":443,"ip_protocol":6,"detected_application":%s,"detected_application_name":"%s","detected_protocol":91,"detected_protocol_name":"TLS","category":{"application":10,"protocol":20},"local_bytes":0,"other_bytes":0,"total_bytes":0}}\n' \
+			"$1" "$2" "$3" "$4" "$5"
+		printf '{"type":"flow_stats","internal":true,"interface":"br-lan","flow":{"digest":"%s","local_ip":"192.168.9.%s","local_mac":"%s","other_ip":"93.184.216.34","other_mac":"02:00:00:00:00:ff","local_bytes":%s,"other_bytes":%s,"total_bytes":%s}}\n' \
+			"$1" "$2" "$3" "$6" "$7" "$8"
+	}
+
+	{
+		hello
+		dev_flow DD000001 10 02:00:00:00:00:aa 4001 "netify.alpha" 1000 2000 3000
+		dev_flow DD000002 10 02:00:00:00:00:aa 4002 "netify.beta"   100  200  300
+		dev_flow DD000003 11 02:00:00:00:00:bb 4001 "netify.alpha"   10   20   30
+		# A flow whose LIFETIME counter exceeds what appflow attributed, which
+		# is what a stub adopted mid-transfer looks like: netifyd reports the
+		# connection's whole life, appflow only ever attributes what it saw.
+		# Without a row like this the two numbers are equal for every flow and
+		# summing the wrong one is invisible, which is exactly what happened:
+		# the sabotage below passed until this line existed.
+		dev_flow DD000004 12 02:00:00:00:00:cc 4003 "netify.gamma"  400  600 9000
+	} > "$EV"
+	feed_and_settle
+
+	# --- devices restricted to an application -----------------------------
+
+	# SABOTAGE: in m_devices, ignore req.args.apps and always take the
+	# aggregate path. from_flows goes false and every count below is wrong.
+	local A B
+	A=$(ubus call appflow devices '{"apps":["a4001"],"limit":10}' 2>/dev/null)
+
+	chk "a device query restricted to one app says it came from flows" \
+	    "1" "$(printf '%s' "$A" | grep -c '"from_flows": true')"
+	chk "and finds BOTH devices carrying that application" \
+	    "2" "$(printf '%s' "$A" | jsonfilter -e '@.total' 2>/dev/null)"
+
+	# The heavier device sorts first, and its bytes are its own, not the
+	# application's total across devices.
+	#
+	# SABOTAGE: sum fr.total instead of fr.up + fr.down. Device cc's flow has a
+	# lifetime counter of 9000 and 1000 attributed, so the sabotage reports
+	# 9000 and this goes red. Every other flow in the fixture has the two equal,
+	# which is why that row had to be added: without it the sabotage passed.
+	chk "the busier device is first" "3000" \
+	    "$(printf '%s' "$A" | jsonfilter -e '@.devices[0].bytes_total' 2>/dev/null)"
+	chk "and the quieter one carries only its own bytes" "30" \
+	    "$(printf '%s' "$A" | jsonfilter -e '@.devices[1].bytes_total' 2>/dev/null)"
+
+	# An application nothing used yields an empty answer, not the whole list.
+	#
+	# SABOTAGE: treat an empty match set as "no filter". This returns every
+	# device, which is the failure that looks like the filter silently not
+	# working.
+	chk "an application with no flows yields no devices" "0" \
+	    "$(ubus call appflow devices '{"apps":["a9999"]}' 2>/dev/null | jsonfilter -e '@.total')"
+
+	# Absent or empty `apps` must take the ordinary aggregate path, or every
+	# unfiltered page load starts answering from the flow table instead.
+	chk "no apps argument means the ordinary aggregate" "1" \
+	    "$(ubus call appflow devices '{"limit":5}' 2>/dev/null | grep -c '"from_flows": false')"
+
+	# --- applications restricted to a device ------------------------------
+
+	# The mirror image, and the one a person actually reaches for.
+	#
+	# SABOTAGE: in apps_for_device, compare fr.app_key against dev instead of
+	# fr.dev_key. Everything below goes red at once.
+	B=$(ubus call appflow apps '{"device":"02:00:00:00:00:aa","limit":10}' 2>/dev/null)
+
+	chk "an application query scoped to a device says it came from flows" \
+	    "1" "$(printf '%s' "$B" | grep -c '"from_flows": true')"
+	chk "and finds both applications that device used" \
+	    "2" "$(printf '%s' "$B" | jsonfilter -e '@.total' 2>/dev/null)"
+	chk "the heavier application is first" "3000" \
+	    "$(printf '%s' "$B" | jsonfilter -e '@.apps[0].bytes_total' 2>/dev/null)"
+	chk "and the lighter one is its own total" "300" \
+	    "$(printf '%s' "$B" | jsonfilter -e '@.apps[1].bytes_total' 2>/dev/null)"
+
+	# The other device used only one application, which is the check that the
+	# scope is really per-device rather than global.
+	chk "a different device sees only its own applications" "1" \
+	    "$(ubus call appflow apps '{"device":"02:00:00:00:00:bb"}' 2>/dev/null | jsonfilter -e '@.total')"
+
+	chk "a device with no flows yields nothing" "0" \
+	    "$(ubus call appflow apps '{"device":"02:00:00:00:00:zz"}' 2>/dev/null | jsonfilter -e '@.total')"
+
+	chk "no device argument means the ordinary aggregate" "1" \
+	    "$(ubus call appflow apps '{"limit":5}' 2>/dev/null | grep -c '"from_flows": false')"
+
+	# --- the argument policy ---------------------------------------------
+
+	# ubus REJECTS an undeclared argument rather than ignoring it, and the
+	# rejection presents as the method returning nothing at all. Both new
+	# arguments had to be added to the published policy, and forgetting either
+	# is silent.
+	#
+	# SABOTAGE: remove `apps: []` or `device: ""` from the publish() policy.
+	chk "the devices policy declares apps" "1" \
+	    "$(ubus -v list appflow 2>/dev/null | grep -c '\"devices\":.*\"apps\":\"Array\"')"
+	chk "the apps policy declares device" "1" \
+	    "$(ubus -v list appflow 2>/dev/null | grep -c '\"apps\":.*\"device\":\"String\"')"
+
+	# --- accounting is untouched -----------------------------------------
+
+	# Both directions read the flow table and write nothing. Conservation must
+	# hold exactly as it did: 3000 + 300 + 30.
+	#
+	# SABOTAGE: have either function mutate fr.up/fr.down while summing.
+	# ATTRIBUTED, NOT LIFETIME. Device cc contributes its attributed 1000, not
+	# its 9000 lifetime, so the total is 3000 + 300 + 30 + 1000.
+	#
+	# SABOTAGE: sum fr.total in either drill-down function.
+	chk "a drill-down reports ATTRIBUTED bytes, not the lifetime counter" "1000" \
+	    "$(ubus call appflow apps '{"device":"02:00:00:00:00:cc"}' 2>/dev/null | jsonfilter -e '@.apps[0].bytes_total')"
+
+	chk "byte conservation is unaffected by either drill-down" "4330" \
+	    "$(ubus call appflow summary 2>/dev/null | sed -n 's/.*"bytes_total": *\([0-9]*\).*/\1/p' | head -1)"
+}
+
 # ------------------------------------------------------------------------ run
 
 printf 'appflow protocol and bounds suite\n'
@@ -1522,9 +1663,10 @@ case "$GROUP" in
 	acl)          test_acl ;;
 	ai)           test_ai_breakout ;;
 	hostmap)      test_hostmap ;;
+	drilldown)    test_drilldown ;;
 	all)          test_conservation; test_protocol; test_bounds
 	              test_attribution; test_hostile; test_lifecycle; test_acl
-	              test_ai_breakout; test_hostmap ;;
+	              test_ai_breakout; test_hostmap; test_drilldown ;;
 	*)            printf "unknown group '%s'\n" "$GROUP"; exit 2 ;;
 esac
 
