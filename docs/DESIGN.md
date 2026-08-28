@@ -799,3 +799,26 @@ ever appeared, the next counted log lines and read past the count, which failed
 because `logread` is a RING whose line count stops growing once it is full. A
 unique marker written with `logger` is immune to both. See
 `tests/protocol-suite.sh hostmap`.
+
+## 13. Queued for 1.1.1
+
+Two small things found by a user watching a live dashboard, where one streaming
+session buried everything else.
+
+**The search box hides a feature it already has.** `statistics.js` filters on
+the application label, the key AND the category label, so typing "AI" already
+narrows the table to the AI categories. The placeholder reads "Search app
+name", so nobody would ever discover that. A one-string fix, and arguably a
+defect rather than an enhancement: the capability is shipped and the label
+conceals it.
+
+**There is no way to exclude.** Filtering is include-only, so "show me
+everything except Netflix" cannot be expressed. That is exactly what you want
+when a single high-rate flow dominates the view, which is the situation that
+prompted the question.
+
+**Clicking a category in the donut should filter to it.** The obvious gesture,
+and it does nothing today.
+
+None of these were held for 1.1.0: bolting a new interaction model onto the
+statistics view at the end of a release is how a release slips or breaks.
