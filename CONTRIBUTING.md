@@ -70,11 +70,11 @@ wrong when measured (documented in DESIGN 2.4 and 2.5).
 the two shell suites need a sandbox router and must be run one at a time.
 
     node tests/frontend-suite.js      # 31 checks, no router needed
-    sh   tests/protocol-suite.sh      # 75 checks, sandbox router, no traffic
+    sh   tests/protocol-suite.sh      # 87 checks, sandbox router, no traffic
     sh   tests/hardware-suite.sh      # 15 checks, sandbox router, real traffic
 
 `protocol-suite.sh` takes a group name: conservation, protocol, bounds,
-attribution, hostile, lifecycle, acl, ai, or all (the default).
+attribution, hostile, lifecycle, acl, ai, hostmap, or all (the default).
 
 **`hardware-suite.sh` skips its wire-ratio check when netifyd does not
 capture every default-route interface**, and says which one. That check

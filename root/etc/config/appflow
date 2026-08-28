@@ -32,3 +32,37 @@ config appflow 'main'
 	#
 	# 0 disables it entirely.
 	option ai_breakout '1'
+
+# ---------------------------------------------------------------------------
+# Teaching AppFlow a service it does not know
+# ---------------------------------------------------------------------------
+#
+# netifyd's signature set is vendor data and it goes stale; the copy shipped
+# with OpenWrt is dated August 2023. AppFlow recognises a built-in list of
+# services by the server name their TLS connections announce, and a `hostmap`
+# section adds to that list or overrides it.
+#
+# Each section teaches one domain suffix:
+#
+#	config hostmap
+#		option suffix 'torproject.org'
+#		option name 'Tor'
+#		option category 'Privacy'
+#
+# suffix    matched against the last two, three or four labels of the server
+#           name, anchored on a label boundary. 'torproject.org' matches
+#           'www.torproject.org' and 'check.torproject.org' but NOT
+#           'torproject.org.example.com'. Must contain a dot.
+# name      what appears in the application list.
+# category  what appears in the category breakdown. Free text; reuse an
+#           existing one to group with it, or invent your own.
+# strong    optional, default 0. 0 means netifyd's own identification wins
+#           where it has one, and this only fills a gap. 1 means override
+#           netifyd too, which is what you want when netifyd recognises a
+#           parent brand and swallows the service inside it.
+#
+# Apply with: /etc/init.d/appflowd restart
+# Check it took: logread -e appflowd | grep hostmap
+#
+# The same section overrides a built-in entry, so this is also how you correct
+# one that is wrong for your network.

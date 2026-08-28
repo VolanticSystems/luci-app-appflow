@@ -765,3 +765,37 @@ containing AI flows for precisely this reason.
   names the CDN.
 - **No icons ship for these entries.** They render as letter tiles until the
   icon pack gains matching `appflow.*` keys.
+
+## 12. Extensibility: the hostname table is not a constant
+
+The AI breakout (section 11) shipped its table as a constant in the daemon,
+which meant adding a service required editing the source and rebuilding the
+package. For a tool whose central claim is that netifyd's signature set is three
+years stale, being un-extendable is the wrong shape, and the question that
+exposed it was the obvious one: "I have a service I want measured, what do I
+do?"
+
+`config hostmap` sections in `/etc/config/appflow` are read at config load and
+consulted BEFORE the built-in table, so one mechanism does both jobs: adding a
+service that is missing, and correcting one that is wrong.
+
+```
+config hostmap
+	option suffix 'torproject.org'
+	option name 'Tor'
+	option category 'Privacy'
+	option strong '0'
+```
+
+**A malformed entry is refused and named in the log.** A suffix with no dot can
+never match, because the matcher rebuilds whole labels rather than comparing
+substrings, so accepting one produces a rule that silently does nothing and
+looks identical to the feature being broken.
+
+That guard has no effect on classification, only on whether the user is told,
+and the test for it had to be written accordingly. Two earlier versions were
+tautologies: one grepped the whole log and passed forever once the message had
+ever appeared, the next counted log lines and read past the count, which failed
+because `logread` is a RING whose line count stops growing once it is full. A
+unique marker written with `logger` is immune to both. See
+`tests/protocol-suite.sh hostmap`.

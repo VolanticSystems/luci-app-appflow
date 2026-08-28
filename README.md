@@ -112,6 +112,56 @@ it cannot do: match a service behind a shared CDN hostname, and survive ECH,
 which encrypts the SNI. netifyd has the same ECH exposure. Detail in
 [docs/DESIGN.md](docs/DESIGN.md) section 11.
 
+## Teaching it a service it does not know
+
+netifyd's signature set is vendor data and it goes stale: the copy shipped with
+OpenWrt is dated August 2023. AppFlow recognises services by the server name
+their TLS connections announce, and you can add to that list yourself without
+touching any code.
+
+Add a section to `/etc/config/appflow`:
+
+```
+config hostmap
+	option suffix 'torproject.org'
+	option name 'Tor'
+	option category 'Privacy'
+```
+
+then `/etc/init.d/appflowd restart`. Traffic to `www.torproject.org` and
+`check.torproject.org` now appears as **Tor** under **Privacy**.
+
+| option | meaning |
+|---|---|
+| `suffix` | matched against the last two, three or four labels of the server name, anchored on a label boundary. Must contain a dot. |
+| `name` | what appears in the application list. |
+| `category` | what appears in the category breakdown. Free text; reuse an existing one to group with it, or invent your own. |
+| `strong` | optional, default `0`. `0` fills a gap only, leaving netifyd's own identification alone where it has one. `1` overrides netifyd too, for when it recognises a parent brand and swallows the service inside it. |
+
+**The same section overrides a built-in entry**, so this is also how you correct
+one that is wrong for your network:
+
+```
+config hostmap
+	option suffix 'anthropic.com'
+	option name 'Work AI'
+	option category 'Business'
+```
+
+Matching is anchored on label boundaries, so `torproject.org` matches
+`check.torproject.org` and **not** `torproject.org.example.com`, which anyone
+can register. A malformed entry is skipped and named in the log rather than
+silently ignored, because a typo otherwise looks exactly like the feature not
+working:
+
+```
+logread -e appflowd | grep hostmap
+```
+
+This is name recognition, not deep packet inspection, and it inherits the same
+limits: a service behind a shared CDN hostname is invisible, and ECH would end
+it. Thirteen checks in `tests/protocol-suite.sh hostmap` cover it.
+
 ## Known limitations
 
 Read these before installing. They are measured and documented rather than
@@ -179,13 +229,13 @@ number hides cap pressure underneath normal behaviour.
 
 ## Tests
 
-Three suites, 126 checks, no failures. Two need a sandbox router; one needs
+Three suites, 138 checks, no failures. Two need a sandbox router; one needs
 nothing but Node and runs on every push.
 
 | suite | checks | what it does |
 |---|---|---|
 | `tests/frontend-suite.js` | 31 | loads the real view code under Node. Mostly regression tests for defects that shipped. |
-| `tests/protocol-suite.sh` | 75 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
+| `tests/protocol-suite.sh` | 87 | replaces the agent with a socket the test controls, so byte arithmetic is checked against hand-computed totals rather than a tolerance band, and the error paths a real agent never produces get exercised. |
 | `tests/hardware-suite.sh` | 15 | drives real traffic and compares against the client interface's own counter in `/sys/class/net`, which nothing in this daemon can influence. |
 
 Every check names, in a comment written before the assertion, the smallest

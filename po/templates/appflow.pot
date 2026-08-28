@@ -5,7 +5,7 @@ msgstr "Content-Type: text/plain; charset=UTF-8"
 msgid "%d applications"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1163
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1177
 msgid "%d apps, %d devices"
 msgstr ""
 
@@ -68,7 +68,7 @@ msgstr ""
 msgid "AppFlow"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1115
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1129
 msgid "AppFlow also needs the Netify Agent running (%s), since that is where the per-application classification comes from."
 msgstr ""
 
@@ -76,7 +76,7 @@ msgstr ""
 msgid "AppFlow statistics cleared."
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1105
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1119
 msgid "AppFlow: access denied"
 msgstr ""
 
@@ -122,11 +122,11 @@ msgstr ""
 msgid "Collecting samples…"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1157
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1171
 msgid "Collector state unknown"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1167
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1181
 msgid "Collector uptime: %s"
 msgstr ""
 
@@ -155,7 +155,7 @@ msgstr ""
 msgid "Devices"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1068
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1082
 #: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/overview.js:186
 #: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/overview.js:233
 #: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/statistics.js:28
@@ -164,8 +164,8 @@ msgstr ""
 msgid "Download"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:740
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:960
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:754
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:974
 msgid "Download: %s, upload: %s"
 msgstr ""
 
@@ -182,7 +182,7 @@ msgstr ""
 msgid "File Sharing"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1160
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1174
 msgid "Flows tracked: %d"
 msgstr ""
 
@@ -214,11 +214,11 @@ msgstr ""
 msgid "Media Provider"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1155
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1169
 msgid "Netify agent connected"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1156
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1170
 msgid "Netify agent disconnected"
 msgstr ""
 
@@ -243,7 +243,7 @@ msgstr ""
 msgid "No categories yet."
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1059
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1073
 msgid "No data"
 msgstr ""
 
@@ -300,7 +300,7 @@ msgstr ""
 msgid "Share"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1052
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1066
 msgid "Share of traffic by category"
 msgstr ""
 
@@ -333,7 +333,7 @@ msgstr ""
 msgid "Streaming Media"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1108
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1122
 msgid "The AppFlow collector could not be reached over ubus, so there is no traffic data to show. Start the service and this page picks it up automatically."
 msgstr ""
 
@@ -366,11 +366,11 @@ msgstr ""
 msgid "Total"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:904
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:918
 msgid "Traffic over time"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:987
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1001
 msgid "Traffic per interval"
 msgstr ""
 
@@ -394,7 +394,7 @@ msgstr ""
 msgid "Updated %s"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1073
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1087
 #: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/overview.js:187
 #: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/overview.js:234
 #: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/statistics.js:29
@@ -416,11 +416,11 @@ msgstr ""
 msgid "VoIP"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1105
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1119
 msgid "appflowd is not running"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1107
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1121
 msgid "appflowd is running, but this LuCI session was refused access to it over ubus (permission denied). This is an ACL problem, not a stopped service: confirm the luci-app-appflow ACL is installed and reload rpcd."
 msgstr ""
 
@@ -436,7 +436,7 @@ msgstr ""
 msgid "last 60 minutes"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1170
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1184
 msgid "netifyd %s"
 msgstr ""
 
@@ -445,7 +445,7 @@ msgstr ""
 msgid "now"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:715
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:729
 msgid "router"
 msgstr ""
 
@@ -458,7 +458,7 @@ msgstr ""
 msgid "top, by cumulative bytes"
 msgstr ""
 
-#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1055
+#: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/common.js:1069
 #: applications/luci-app-appflow/htdocs/luci-static/resources/view/appflow/overview.js:292
 msgid "total"
 msgstr ""

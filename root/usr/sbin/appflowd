@@ -237,6 +237,52 @@ function cfg_load() {
 		logmsg("warn", "uci: %s — using defaults", e);
 	}
 
+	/* User-supplied hostname mappings, from `config hostmap` sections.
+	 *
+	 * Each adds or OVERRIDES one entry in the built-in table, so this is both
+	 * the way to teach appflow a service it does not know and the way to
+	 * correct one it gets wrong. Consulted before the built-in table.
+	 *
+	 *     config hostmap
+	 *             option suffix 'torproject.org'
+	 *             option name 'Tor'
+	 *             option category 'Privacy'
+	 *             option strong '0'
+	 *
+	 * A malformed section is skipped and named in the log rather than
+	 * silently ignored: a typo in a suffix produces a rule that matches
+	 * nothing, which looks identical to the feature not working.
+	 */
+	let hostmap = {};
+	let bad = 0;
+	try {
+		cursor().foreach("appflow", "hostmap", function(h) {
+			let suf = lc(trim(h.suffix ?? ""));
+			let nm  = trim(h.name ?? "");
+
+			/* A suffix must contain a dot, or it can never match: the matcher
+			 * rebuilds the last N labels of a hostname and compares, so a
+			 * single label matches nothing. */
+			if (!length(suf) || !length(nm) || index(suf, ".") < 0) {
+				bad++;
+				logmsg("warn", "hostmap: skipping entry with suffix %s name %s",
+				       suf ?? "(empty)", nm ?? "(empty)");
+
+				return;
+			}
+
+			hostmap[suf] = [ nm,
+			                 length(trim(h.category ?? "")) ? trim(h.category) : "other",
+			                 num(h.strong, 0) != 0 ];
+		});
+	} catch (e) {
+		logmsg("warn", "hostmap: %s", e);
+	}
+	if (length(hostmap))
+		logmsg("info", "hostmap: %d user entr%s loaded%s",
+		       length(hostmap), length(hostmap) == 1 ? "y" : "ies",
+		       bad ? sprintf(", %d skipped", bad) : "");
+
 	cfg = {
 		socket_path: length(s.socket_path ?? "") ? s.socket_path : CFG_DEFAULTS.socket_path,
 		flow_max: clampi(num(s.flow_max, CFG_DEFAULTS.flow_max), 64, 65536),
@@ -246,7 +292,8 @@ function cfg_load() {
 		// Absent means ON. A dashboard feature that defaults to off is a
 		// feature nobody sees, and this one only ever relabels flows netifyd
 		// had no answer for.
-		ai_breakout: num(s.ai_breakout, CFG_DEFAULTS.ai_breakout) != 0
+		ai_breakout: num(s.ai_breakout, CFG_DEFAULTS.ai_breakout) != 0,
+		hostmap: hostmap
 	};
 	cfg.rate_ms = cfg.rate_window * 1000;
 	cfg.idle_ms = cfg.idle_timeout * 1000;
@@ -1088,7 +1135,10 @@ function ai_match(host) {
 
 	for (let take = 2; take <= 4 && take <= n; take++) {
 		let suffix = join(".", slice(parts, n - take));
-		let hit = AI_HOSTS[suffix];
+
+		/* User entries first, so `config hostmap` can override a built-in that
+		 * is wrong as well as add one that is missing. */
+		let hit = (cfg?.hostmap ?? {})[suffix] ?? AI_HOSTS[suffix];
 
 		/* Type-checked rather than merely truthy.
 		 *

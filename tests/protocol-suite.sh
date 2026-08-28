@@ -1301,6 +1301,170 @@ test_ai_breakout() {
 	uci commit appflow
 }
 
+test_hostmap() {
+	head2 "HOSTMAP: teaching appflow a service it does not know"
+
+	# WHY THIS EXISTS. Someone asked the obvious question of any traffic
+	# classifier: "I have a service I want measured, what do I do?" The answer
+	# used to be "edit the daemon and rebuild the package", which for a tool
+	# whose pitch is that netifyd's signatures are three years stale is the
+	# wrong shape entirely.
+	#
+	# `config hostmap` sections add to the built-in table, or override it.
+
+	cp /etc/config/appflow /tmp/appflow.hostmap.keep
+
+	# The worked example from the documentation, verbatim. If the docs and the
+	# code ever diverge, this is where it shows.
+	cat >> /etc/config/appflow <<'HMEOF'
+
+config hostmap
+	option suffix 'torproject.org'
+	option name 'Tor'
+	option category 'Privacy'
+HMEOF
+	uci commit appflow 2>/dev/null
+
+	{
+		hello
+		ai_flow HM000001 0 "" "check.torproject.org"     100 200 300
+		ai_flow HM000002 0 "" "www.torproject.org"        10  20  30
+		# NOT Tor: shares a substring but not a label boundary. Anyone can
+		# register this, and a substring matcher would label it Tor.
+		#
+		# SABOTAGE: make the matcher use index() instead of rebuilding the
+		# last N labels. This host is relabelled and the byte check goes red.
+		ai_flow HM000003 0 "" "torproject.org.evil.test"   7  13  20
+	} > "$EV"
+	feed_and_settle
+
+	chk "a user-supplied suffix is recognised" "YES" "$(app_present 'Tor')"
+
+	# Both real hosts aggregate into the one application: 300 + 30 = 330.
+	#
+	# SABOTAGE: key the app on the matched suffix rather than the label. The
+	# rows split and this drops to 300.
+	chk "both hosts under it aggregate into one application" "330" "$(app_bytes Tor)"
+
+	# The lookalike must keep its own identity. It is app_id 0 over
+	# detected_protocol 91, so unlabelled it aggregates as TLS with its own 20
+	# bytes.
+	chk "a lookalike domain is not captured by a user entry" "20" "$(app_bytes TLS)"
+
+	# The counter must move by exactly the number relabelled, so "the label
+	# appeared" cannot come from somewhere else.
+	chk "exactly two flows were relabelled" "2" "$(field flows ai_labeled)"
+
+	head2 "HOSTMAP: overriding a built-in entry"
+
+	# The same mechanism corrects a built-in that is wrong for someone's
+	# network, which is the second half of what extensibility means.
+	#
+	# SABOTAGE: consult AI_HOSTS before cfg.hostmap in the matcher. The
+	# built-in name comes back and this goes red.
+	cp /tmp/appflow.hostmap.keep /etc/config/appflow
+	cat >> /etc/config/appflow <<'HMEOF'
+
+config hostmap
+	option suffix 'anthropic.com'
+	option name 'Work AI'
+	option category 'Business'
+HMEOF
+	uci commit appflow 2>/dev/null
+
+	{
+		hello
+		ai_flow HM000010 0 "" "api.anthropic.com" 500 500 1000
+	} > "$EV"
+	feed_and_settle
+
+	chk "a user entry overrides the built-in name" "YES" "$(app_present 'Work AI')"
+	chk "and the built-in name is gone" "NO" "$(app_present 'Anthropic (Claude)')"
+
+	head2 "HOSTMAP: malformed entries are refused, not half-applied"
+
+	# A suffix with no dot can never match, because the matcher compares whole
+	# labels, so accepting one produces a rule that silently does nothing.
+	#
+	# THE GUARD'S ONLY OBSERVABLE EFFECT IS THE LOG LINE, and that is worth
+	# knowing. Removing the guard changes no classification at all: a dotless
+	# suffix matches nothing either way. What it changes is whether a user who
+	# fatfingered an entry is TOLD, or is left staring at a feature that appears
+	# not to work. An earlier version of this comment claimed the sabotage would
+	# redden a classification check; running it proved otherwise, so the check
+	# below asserts the thing that actually differs.
+	#
+	# SABOTAGE: drop the `index(suf, ".") < 0` guard. The warning disappears and
+	# the log check goes red.
+	cp /tmp/appflow.hostmap.keep /etc/config/appflow
+	# MARK THE LOG, do not count it.
+	#
+	# Two ways this went wrong before it worked. Grepping the whole history
+	# passes forever once a message has appeared even once, so the sabotage that
+	# removes the guard left the check green on a PREVIOUS run's warning. Then
+	# counting lines and reading past the count failed too, because logread is a
+	# RING: the buffer was already full at its maximum, the count stopped
+	# growing, and the window was always empty. A unique marker is immune to
+	# both.
+	local LOGTAG
+	LOGTAG="hostmap-test-$$-$(date +%s)"
+	logger -t appflow-suite "$LOGTAG" 
+	cat >> /etc/config/appflow <<'HMEOF'
+
+config hostmap
+	option suffix 'notadomain'
+	option name 'Bad'
+
+config hostmap
+	option suffix 'example.net'
+	option name ''
+
+config hostmap
+	option suffix 'good.example'
+	option name 'Good'
+HMEOF
+	uci commit appflow 2>/dev/null
+
+	{
+		hello
+		ai_flow HM000020 0 "" "host.good.example" 40 60 100
+		ai_flow HM000021 0 "" "notadomain"        10 10  20
+	} > "$EV"
+	feed_and_settle
+
+	chk "the valid entry still works alongside malformed ones" "YES" "$(app_present 'Good')"
+	chk "an entry with no name is refused" "NO" "$(app_present 'Bad')"
+	chk "only the valid flow was relabelled" "1" "$(field flows ai_labeled)"
+
+	# The user must be TOLD which entry was skipped, by name. Silence here is
+	# indistinguishable from the feature being broken.
+	local NEWLOG
+	NEWLOG=$(logread 2>/dev/null | sed -n "/$LOGTAG/,\$p")
+	if printf '%s
+' "$NEWLOG" | grep -q "hostmap: skipping entry with suffix notadomain"; then
+		ok "a dotless suffix is named in the log, not silently dropped"
+	else
+		bad "a dotless suffix was skipped without telling anyone"
+	fi
+	if printf '%s
+' "$NEWLOG" | grep -q "hostmap: skipping entry with suffix example.net"; then
+		ok "an entry with no name is named in the log too"
+	else
+		bad "the nameless entry was skipped without telling anyone"
+	fi
+
+	# Accounting is untouched by any of this: 100 + 20 = 120.
+	#
+	# SABOTAGE: have the hostmap path touch fr.a or run after flow_attach().
+	local tot
+	tot=$(ubus call appflow summary 2>/dev/null | sed -n 's/.*"bytes_total": *\([0-9]*\).*/\1/p' | head -1)
+	chk "byte conservation holds with user entries present" "120" "${tot:-MISSING}"
+
+	cp /tmp/appflow.hostmap.keep /etc/config/appflow
+	uci commit appflow 2>/dev/null
+	rm -f /tmp/appflow.hostmap.keep
+}
+
 # ------------------------------------------------------------------------ run
 
 printf 'appflow protocol and bounds suite\n'
@@ -1357,9 +1521,10 @@ case "$GROUP" in
 	lifecycle)    test_lifecycle ;;
 	acl)          test_acl ;;
 	ai)           test_ai_breakout ;;
+	hostmap)      test_hostmap ;;
 	all)          test_conservation; test_protocol; test_bounds
 	              test_attribution; test_hostile; test_lifecycle; test_acl
-	              test_ai_breakout ;;
+	              test_ai_breakout; test_hostmap ;;
 	*)            printf "unknown group '%s'\n" "$GROUP"; exit 2 ;;
 esac
 
