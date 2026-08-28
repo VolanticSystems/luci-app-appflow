@@ -92,7 +92,7 @@ all, so anything from Claude to Midjourney lands in generic HTTP/S.
 
 The identifying data is already present: netifyd reports the TLS SNI, and
 appflow already stores it. So appflow matches that name against a built-in
-table of around ninety AI service domains and gives them their own application
+table of eighty-five AI service domains and gives them their own application
 rows and four categories: assistants, media, developer tools and
 infrastructure (aggregators, inference APIs, GPU rental, vector stores).
 
