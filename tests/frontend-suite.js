@@ -218,22 +218,74 @@ const NETIFYD_TAGS = [
 	'vpn', 'vpn-and-proxy', 'web'
 ];
 
+// THE MODULE IS LOADED A SECOND TIME WITH A MARKING TRANSLATOR, and every
+// check below runs against that copy rather than against `c`.
+//
+// The first version of this group asked "is the returned string in the set of
+// strings passed to _()". That is weaker than it looks, and a panel named the
+// general shape after an executed sabotage had already found one instance:
+// with the default identity translator, `_('Web')` and a runtime title-caser
+// both produce exactly `'Web'`, so a membership test can be satisfied by a
+// COINCIDENCE between an untranslated label and some other string that did go
+// through _(). It happened for real with the AI categories, where the table
+// entry _('AI media') put that exact string in the set, so a daemon that had
+// reverted to sending 'AI media' still passed.
+//
+// With `_()` returning `[[msgid]]`, a translated label and a generated one are
+// different strings, and plain equality becomes a sound test again. `c` keeps
+// the identity translator because every other check in this file asserts on
+// real English output.
+const T = (s) => `[[${s}]]`;
+const t9n = load(COMMON, {
+	rpc:     { declare: (o) => () => { throw new Error('rpc called: ' + (o && o.method)); } },
+	request: { get: () => { throw new Error('request called'); } }
+}, { translate: T });
+
+// __translated still records the ARGUMENT to _(), not its return, so the
+// catalogue check further down is unaffected by the marking translator.
 const translated = new Set(c.__translated.filter(Boolean));
 
-// A membership check against an empty set passes vacuously. Refuse to report
-// on one, the same way the catalogue check below does.
+// A check over an empty set passes vacuously. Refuse to report on one, the
+// same way the catalogue check below does.
 if (translated.size === 0) {
 	bad('the run reached NO _() strings, so nothing below proves anything');
+} else if (t9n.normDevice({}).name !== T('Unknown device')) {
+	// If the marking translator is not actually reaching the product, every
+	// equality check below would compare English with English and pass while
+	// proving nothing. Prove the instrument works before trusting it.
+	//
+	// ANCHOR THIS ON A STRING THAT IS NOT IN EITHER TABLE UNDER TEST. The
+	// first version probed catLabel('web'), which is one of the very entries
+	// these checks exist to police: unwrapping that entry to `'web': 'Web'`
+	// made the probe fail, so a real product defect reported itself as a
+	// broken instrument and skipped the nine checks that would have named it.
+	// normDevice's fallback is translated on a path no check below asserts on.
+	bad('the marking translator had no effect, so nothing below proves anything');
 } else {
-	// SABOTAGE: delete any one entry from CATEGORY_LABELS in common.js. The
-	// title-caser still returns the same English text and every equality check
-	// above stays green; this goes red and names the tag.
-	const untranslatable = NETIFYD_TAGS.filter((t) => !translated.has(c.catLabel(t)));
+	// SABOTAGE: delete any one entry from CATEGORY_LABELS in common.js, or
+	// write it unwrapped as `'web': 'Web'`. The title-caser still returns the
+	// same English text and every equality check above stays green; this goes
+	// red and names the tag.
+	const untranslatable = NETIFYD_TAGS.filter((t) => t9n.catLabel(t) !== T(c.catLabel(t)));
 	if (untranslatable.length === 0)
-		ok(`all ${NETIFYD_TAGS.length} netifyd category tags return a string that went through _()`);
+		ok(`all ${NETIFYD_TAGS.length} netifyd category tags return the translator's output`);
 	else
 		bad(`${untranslatable.length} category tag(s) produce a label _() never saw, `
 		    + `so they are English in every language: ${JSON.stringify(untranslatable)}`);
+
+	// Every one of those labels must also be in the shipped catalogue. The
+	// check above proves _() was called; this proves the extractor saw it.
+	//
+	// SABOTAGE: add a category entry to common.js without regenerating the
+	// .pot. This goes red; the check above stays green.
+	const catalogue = potMsgids(POT);
+	const uncatalogued = NETIFYD_TAGS.map((t) => c.catLabel(t))
+	                                  .filter((s) => !catalogue.has(s));
+	if (uncatalogued.length === 0)
+		ok('and every one of those labels is in appflow.pot');
+	else
+		bad(`${uncatalogued.length} label(s) reach _() but are not in the catalogue: `
+		    + JSON.stringify(uncatalogued.slice(0, 5)));
 
 	// The daemon's own AI categories, which is where WE introduced this bug
 	// rather than inheriting it. Until 1.1.1 appflowd sent 'AI assistants' and
@@ -264,7 +316,7 @@ if (translated.size === 0) {
 			bad(`the daemon emits pre-rendered display string(s) ${JSON.stringify(shaped)}; `
 			    + 'a category that arrives already in English has no key to look up');
 
-		const unknown = daemonCats.filter((t) => !translated.has(c.catLabel(t)));
+		const unknown = daemonCats.filter((t) => t9n.catLabel(t) !== T(c.catLabel(t)));
 		if (unknown.length === 0)
 			ok(`and the frontend has a _() label for all ${daemonCats.length} of them`);
 		else
@@ -276,25 +328,40 @@ if (translated.size === 0) {
 	// already rendered in English because it has no idea what language the
 	// browser wants, so the frontend must name them from the stable key.
 	//
-	// SABOTAGE: delete an entry from DEVICE_LABELS, or key the lookup on the
-	// daemon's name instead of t.key. This goes red.
-	[ 'router', 'unknown', 'multicast' ].forEach(function(key) {
-		const d = c.normDevice({ key: key, name: 'SHOULD NOT BE USED' });
-		if (translated.has(d.name))
+	// The fixture's `name` is deliberately the real English the daemon sends,
+	// not a marker string: a lookup keyed on the name rather than the key is a
+	// plausible implementation and would pass against a fixture that could not
+	// satisfy it.
+	//
+	// SABOTAGE: delete an entry from DEVICE_LABELS, key the lookup on the
+	// daemon's name instead of t.key, or misspell a key. This goes red.
+	[ [ 'router', 'Router' ],
+	  [ 'unknown', 'Unknown' ],
+	  [ 'multicast', 'Multicast / Broadcast' ] ].forEach(function(pair) {
+		const key = pair[0], english = pair[1];
+		const got = t9n.normDevice({ key: key, name: english }).name;
+		if (got === T(english))
 			ok(`pseudo-device '${key}' is named through _(), not from the daemon's English`);
 		else
-			bad(`pseudo-device '${key}' rendered ${JSON.stringify(d.name)}, `
-			    + 'which _() never saw');
+			bad(`pseudo-device '${key}' rendered ${JSON.stringify(got)}, `
+			    + `expected the translated ${JSON.stringify(T(english))}`);
+	});
+
+	// A real device must NOT be captured by that table, even when its DHCP
+	// hostname is exactly the English of a pseudo-device. This is the check
+	// that a name-keyed implementation fails.
+	//
+	// SABOTAGE: index DEVICE_LABELS by the daemon's name rather than t.key.
+	[ 'kitchen-pi', 'Router', 'Multicast / Broadcast' ].forEach(function(name) {
+		const got = t9n.normDevice({ key: 'b4:2e:99:3a:d6:df',
+		                             mac: 'b4:2e:99:3a:d6:df', name: name }).name;
+		if (got === name)
+			ok(`a real device named ${JSON.stringify(name)} keeps its own name`);
+		else
+			bad(`a real device named ${JSON.stringify(name)} was renamed to `
+			    + `${JSON.stringify(got)} by the pseudo-device table`);
 	});
 }
-
-// A real device must NOT be captured by that table: its name comes from the
-// DHCP lease and is not a translatable string.
-//
-// SABOTAGE: drop the hasOwnProperty guard and key the lookup on the name.
-chk('a real device still uses the name the daemon resolved', 'kitchen-pi',
-    c.normDevice({ key: 'b4:2e:99:3a:d6:df', mac: 'b4:2e:99:3a:d6:df',
-                   name: 'kitchen-pi' }).name);
 
 // Both label tables are plain object literals, so they inherit
 // Object.prototype and a bare lookup on an inherited key returns a truthy

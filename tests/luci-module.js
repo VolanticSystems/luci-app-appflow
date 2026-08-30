@@ -61,8 +61,21 @@ function stripRequires(src) {
 	return src.replace(/^\s*'require [^']*';\s*$/gm, '');
 }
 
-// load(file, stubs) -> the object the module returns.
-function load(file, stubs) {
+// load(file, stubs, opts) -> the object the module returns.
+//
+// opts.translate replaces the _() implementation. Default is identity, which
+// is LuCI's real behaviour with no catalogue loaded.
+//
+// WHY A NON-IDENTITY TRANSLATOR IS WORTH HAVING. With identity, a label that
+// went through _() and a label a runtime title-caser produced are the same
+// string, so no assertion on the OUTPUT can tell them apart. That is not
+// hypothetical: three label paths shipped untranslatable underneath a green
+// run of a suite that asserted exactly those outputs. Loading the module a
+// second time with a marking translator makes the two observationally
+// different, and equality assertions become sound again rather than
+// coincidentally true. Raised by a review panel, 2026-08-30.
+function load(file, stubs, opts) {
+	const translate = (opts && opts.translate) || ((s) => s);
 	const src = fs.readFileSync(file, 'utf8');
 	// Every string passed to _() while the module evaluates, in order. This is
 	// not decoration: it lets a test assert that the shipped catalogue
@@ -75,8 +88,11 @@ function load(file, stubs) {
 		// LuCI's _() returns its msgid unchanged when no catalogue is loaded,
 		// which is the default English case, so identity is the real
 		// behaviour rather than a convenient stand-in.
-		_: (s) => { translated.push(s); return s; },
-		N_: (n, s, p) => { translated.push(s); translated.push(p); return n === 1 ? s : p; },
+		_: (s) => { translated.push(s); return translate(s); },
+		N_: (n, s, p) => {
+			translated.push(s); translated.push(p);
+			return translate(n === 1 ? s : p);
+		},
 		L: {
 			// L.resource() builds a static asset URL. It is a pure string
 			// join in LuCI and is used at module top level, so it has to
