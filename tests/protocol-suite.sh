@@ -1084,6 +1084,16 @@ app_bytes() {
 	printf '%s' "${v:-MISSING}"
 }
 
+# The category the daemon PUTS ON THE WIRE for one application. MISSING on a
+# miss, never empty, so a helper that cannot find its subject turns its check
+# red rather than comparing two blanks and passing.
+app_cat() {
+	local v
+	v=$(ubus call appflow apps '{"limit":50}' 2>/dev/null |
+	    jsonfilter -e "@.apps[@.name=\"$1\"].category" | head -1)
+	printf '%s' "${v:-MISSING}"
+}
+
 test_ai_breakout() {
 	head2 "AI BREAKOUT (hostname matching, and the things it must NOT match)"
 
@@ -1157,6 +1167,55 @@ test_ai_breakout() {
 	#
 	# SABOTAGE: delete `stats.ai_labeled++`.
 	chk "exactly three flows were relabelled" "3" "$(field flows ai_labeled)"
+
+	# THE CATEGORY IS A SLUG, AND NOTHING ELSE IN EITHER SUITE CHECKED IT.
+	#
+	# 1.1.0 shipped this column as four English display strings, "AI assistants"
+	# and three siblings, where every netifyd category is a lowercase slug. They
+	# read correctly in English and could therefore never be translated: the
+	# browser renders a category by looking the slug up in a table of _()
+	# literals, and a string that arrives already rendered has no key to look
+	# up. Every check in this group passed throughout, because all of them
+	# assert on labels, bytes and counters and none of them had ever looked at
+	# the category at all.
+	#
+	# This asserts the value ON THE WIRE, from the real daemon, which is the
+	# only place the contract is real. The frontend suite reads the same table
+	# out of the daemon source; that catches a bad edit, this catches a bad
+	# emission, and neither subsumes the other.
+	#
+	# SABOTAGE: in appflowd's AI_HOSTS table, change any category back to a
+	# display string, e.g. "ai-assistants" -> "AI assistants". This goes red and
+	# every other check in this group stays green.
+	chk "the AI category reaches the wire as a slug" \
+	    "ai-assistants" "$(app_cat 'Anthropic (Claude)')"
+	chk "and so does a second vendor's" "ai-assistants" "$(app_cat 'OpenAI')"
+
+	# The mirror: a daemon that hardcoded one slug for everything would pass
+	# both rows above. A flow the AI table did NOT match must still carry the
+	# category netifyd gave it.
+	#
+	# ASSERTED AS A PROPERTY, NOT A LITERAL, AND THAT IS DELIBERATE. The first
+	# version expected "unclassified" and was simply wrong: the fixture sends
+	# category.application 10, and appflowd resolves that through
+	# catnames.app[] against the box's own /etc/netify.d/netify-categories.json,
+	# which on this bench is "file-sharing". Pasting that observed value back in
+	# would have made the check depend on one router's netifyd index, so a
+	# netifyd update would turn it red having broken nothing. What the check is
+	# actually for is that the AI block does not reach flows it never matched.
+	#
+	# SABOTAGE: set the category unconditionally in the AI block rather than
+	# from the table. This goes red while the two rows above stay green.
+	local tlscat verdict
+	tlscat=$(app_cat TLS)
+	case "$tlscat" in
+		MISSING|"") verdict=MISSING ;;
+		ai-*)       verdict=AI-LEAKED ;;
+		*)          verdict=OK ;;
+	esac
+	note "the unmatched TLS flow carries category '$tlscat'"
+	chk "a flow the AI table did not match keeps its netifyd category" \
+	    "OK" "$verdict"
 
 	# ACCOUNTING IS UNTOUCHED. This is the check that matters most: the feature
 	# changes an identity and must not be able to change a byte.
