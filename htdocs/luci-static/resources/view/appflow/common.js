@@ -117,20 +117,99 @@ var CATEGORY_SLOT = {
 var NEUTRAL = 'hsl(0,0%,50%)',
     NEUTRAL_ROLLUP = 'hsl(0,0%,72%)';
 
-/* Netify category tags whose naive title-case reads badly. */
+/*
+ * EVERY category tag, not only the ones whose title-case reads badly.
+ *
+ * Until 1.1.1 this table held twelve entries, the ones where naive title-case
+ * produced the wrong English ('cdn' -> 'Cdn'). Everything else fell through to
+ * the title-caser at the end of catLabel(), which is string manipulation and
+ * not translation: 'web' became 'Web' by an algorithm, in English, in every
+ * language, for ever. `_()` never saw those strings, so the extractor never
+ * put them in the catalogue and no translator could reach them. Reported by
+ * @ntbowen against 1.1.0.
+ *
+ * The keys are the union of application_tag_index and protocol_tag_index from
+ * netifyd 4.4.7's /etc/netify.d/netify-categories.json, read off the bench,
+ * plus appflow's own four. A tag outside this list still title-cases and is
+ * still untranslated, which is a graceful degradation rather than a failure;
+ * frontend-suite.js holds its own copy of the list and goes red when one is
+ * missing, so a netifyd update that adds a tag is a visible event.
+ *
+ * KEEP THE ENGLISH EXACTLY AS THE TITLE-CASER PRODUCED IT where it was already
+ * right. These strings are shipped and screenshotted; this change is about how
+ * a label is produced, not what it says.
+ */
 var CATEGORY_LABELS = {
+	/* netifyd, application_tag_index */
+	'adult':               _('Adult'),
+	'advertiser':          _('Advertiser'),
+	'business':            _('Business'),
 	'cdn':                 _('CDN'),
+	'cybersecurity':       _('Cybersecurity'),
+	'device-iot':          _('IoT Devices'),
+	'education':           _('Education'),
+	'entertainment':       _('Entertainment'),
+	'file-sharing':        _('File Sharing'),
+	'financial':           _('Financial'),
+	'gambling':            _('Gambling'),
+	'games':               _('Games'),
+	'government':          _('Government'),
+	'hosting':             _('Hosting'),
+	'mail':                _('Mail'),
+	'malware':             _('Malware'),
+	'messaging':           _('Messaging'),
+	'news':                _('News'),
+	'os-software-updates': _('OS & Software Updates'),
+	'portal':              _('Portal'),
+	'recreation':          _('Recreation'),
+	'reference':           _('Reference'),
+	'remote-desktop':      _('Remote Desktop'),
+	'shopping':            _('Shopping'),
+	'social-media':        _('Social Media'),
+	'sports':              _('Sports'),
+	'streaming-media':     _('Streaming Media'),
+	'technology':          _('Technology'),
+	'telco':               _('Telco'),
+	'unclassified':        _('Unclassified'),
 	'voip':                _('VoIP'),
 	'vpn-and-proxy':       _('VPN & Proxy'),
-	'os-software-updates': _('OS & Software Updates'),
-	'device-iot':          _('IoT Devices'),
-	'file-sharing':        _('File Sharing'),
+
+	/* netifyd, protocol_tag_index: the tags the application index does not
+	 * also carry. A flow classified by protocol rather than by application
+	 * reaches the browser through exactly the same field. */
+	'authentication':      _('Authentication'),
+	'database':            _('Database'),
 	'file-server':         _('File Server'),
-	'social-media':        _('Social Media'),
-	'streaming-media':     _('Streaming Media'),
-	'remote-desktop':      _('Remote Desktop'),
+	'infrastructure':      _('Infrastructure'),
+	'media':               _('Media'),
 	'media-provider':      _('Media Provider'),
-	'unclassified':        _('Unclassified')
+	'networking':          _('Networking'),
+	'printing':            _('Printing'),
+	'proxy':               _('Proxy'),
+	'vpn':                 _('VPN'),
+	'web':                 _('Web'),
+
+	/* appflow's own, from the AI breakout. The daemon sends these as slugs
+	 * for exactly this reason; see AI_HOSTS in appflowd. */
+	'ai-assistants':       _('AI assistants'),
+	'ai-developer':        _('AI developer'),
+	'ai-infrastructure':   _('AI infrastructure'),
+	'ai-media':            _('AI media')
+};
+
+/*
+ * appflowd collapses unattributed traffic into three synthetic pseudo-devices
+ * and sends their display name already rendered in English, because a daemon
+ * has no idea what language a browser wants. It also sends the stable key
+ * behind that name, so the key is what we translate on: keying on the English
+ * would mean a daemon-side wording change silently reverting the translation.
+ * Every real device keeps the name the daemon resolved from its DHCP lease.
+ * Reported by @ntbowen against 1.1.0, and this is his fix.
+ */
+var DEVICE_LABELS = {
+	'router':    _('Router'),
+	'unknown':   _('Unknown'),
+	'multicast': _('Multicast / Broadcast')
 };
 
 /* Field-name aliases.
@@ -454,7 +533,27 @@ return baseclass.extend({
 		t.key = this.str(raw, [ 'key', 'device', 'id' ], mac || ip || '');
 		t.mac = mac.toUpperCase();
 		t.ip = ip;
-		t.name = this.str(raw, A_DNAM, ip || mac || _('Unknown device'));
+
+		/* The three synthetic pseudo-devices are named on the KEY, not on the
+		 * name the daemon sent: that name is English and pre-rendered, and
+		 * matching it as a string would mean any daemon-side rewording
+		 * silently dropped back to English. Every real device keeps the name
+		 * resolved from its DHCP lease.
+		 *
+		 * REUSE t.key, DO NOT RE-DERIVE IT. The contributor's patch added its
+		 * own `key = this.str(raw, A_KEY)` here, and A_KEY is the APPLICATION
+		 * alias list: it reaches for 'app' and 'application' before 'id', so a
+		 * device row carrying either field would have been named from an
+		 * application identifier. Two key derivations in one function that
+		 * disagree is the bug; the device key is already sitting in t.key,
+		 * three lines up, derived from the device alias list.
+		 *
+		 * hasOwnProperty for the reason given in catLabel(): a bare lookup on
+		 * '__proto__' or 'constructor' returns a truthy object, and t.name is
+		 * assumed to be a string by the .toUpperCase() on the next line. */
+		t.name = Object.prototype.hasOwnProperty.call(DEVICE_LABELS, t.key)
+			? DEVICE_LABELS[t.key]
+			: this.str(raw, A_DNAM, ip || mac || _('Unknown device'));
 		t.seen = this.num(raw, A_SEEN, 0);
 		t.isRouter = !!(raw && raw.is_router);
 
@@ -593,22 +692,36 @@ return baseclass.extend({
 		if (!raw.length)
 			return _('Unclassified');
 
+		/* THE TABLE IS CONSULTED FIRST, ahead of the pass-through below.
+		 *
+		 * Until 1.1.1 the pass-through came first, so nothing after it could
+		 * ever be reached for a value carrying a capital. That is precisely
+		 * how appflow's own four AI categories became permanently English in
+		 * every language: the daemon sent "AI assistants", the pass-through
+		 * returned it verbatim, and the lookup that would have translated it
+		 * was three lines too late to run. The daemon now sends slugs, and
+		 * this ordering means a future daemon-side display string can still be
+		 * translated by adding one key rather than by changing the wire.
+		 *
+		 * hasOwnProperty, not a truthiness test: a plain object literal
+		 * inherits Object.prototype, so CATEGORY_LABELS['__proto__'] and
+		 * ['constructor'] are truthy OBJECTS and would be returned as if they
+		 * were labels. color() below already guards its table this way. */
+		var c = raw.toLowerCase();
+
+		if (Object.prototype.hasOwnProperty.call(CATEGORY_LABELS, c))
+			return CATEGORY_LABELS[c];
+
 		/* Already-cased categories pass through untouched, exactly as
 		 * appLabel() treats already-pretty application names.
 		 *
 		 * netifyd's own categories are lowercase slugs ("web", "networking"),
-		 * so lowercasing them first was harmless. appflow's AI categories are
-		 * not: "AI assistants" was being lowercased to "ai assistants" and then
-		 * title-cased back to "Ai assistants", because the split is on [-_] and
-		 * a space is neither. Deliberate capitalisation must survive, and there
-		 * is no casing rule that turns "ai" into "AI" without a word list. */
+		 * so lowercasing them first is harmless. A capitalised category that
+		 * is NOT in the table must survive as written: the title-case split is
+		 * on [-_] and a space is neither, so "AI assistants" would otherwise
+		 * come back as "Ai assistants". */
 		if (/[A-Z]/.test(raw))
 			return raw;
-
-		var c = raw.toLowerCase();
-
-		if (CATEGORY_LABELS[c])
-			return CATEGORY_LABELS[c];
 
 		return c.split(/[-_]/).map(function(w) {
 			return w.charAt(0).toUpperCase() + w.substr(1);
