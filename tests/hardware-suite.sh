@@ -292,6 +292,56 @@ test_restart() {
 
 # ---------------------------------------------------------------- acl
 
+test_categories() {
+	head2 "Every category this box's netifyd can emit has a translatable label"
+
+	# THE DRIFT GAP, and it is the one thing the offline suite structurally
+	# cannot close. frontend-suite.js checks CATEGORY_LABELS against a list of
+	# 43 tags hand-copied from netifyd 4.4.7. That catches a deleted entry. It
+	# cannot catch netifyd ADDING a tag, because a list written today does not
+	# know about it, and the product's response to an unknown tag is to
+	# title-case it into credible English that is untranslatable for ever.
+	#
+	# Only a real box knows what its own netifyd carries. This check reads the
+	# installed category file and asserts the frontend has a label for every
+	# tag in it, so a netifyd upgrade that adds a category becomes a visible
+	# test failure rather than a silently English label.
+	#
+	# SABOTAGE: delete any entry from CATEGORY_LABELS in common.js. This goes
+	# red and names the tag. To see it fire for real, add a tag to
+	# /etc/netify.d/netify-categories.json that the frontend does not know.
+	local CATS=/etc/netify.d/netify-categories.json
+	local JS=/www/luci-static/resources/view/appflow/common.js
+
+	[ -f "$CATS" ] || { skip "netify category file absent ($CATS)"; return; }
+	[ -f "$JS" ]   || { skip "appflow frontend not installed ($JS)"; return; }
+
+	local tags missing n
+	tags=$(jsonfilter -i "$CATS" -e '@.application_tag_index' \
+	                             -e '@.protocol_tag_index' 2>/dev/null |
+	       grep -o '"[a-z][a-z0-9-]*"' | tr -d '"' | sort -u)
+
+	if [ -z "$tags" ]; then
+		skip "could not read any category tag out of $CATS"
+		return
+	fi
+
+	n=$(printf '%s\n' "$tags" | grep -c .)
+	missing=""
+	for t in $tags; do
+		# The label table is `'tag': _('Label'),`. Matching the quoted key
+		# against the file is enough: an entry that exists but is not wrapped
+		# in _() is the offline suite's job, and it checks exactly that.
+		grep -q "'$t':" "$JS" || missing="$missing $t"
+	done
+
+	if [ -z "$missing" ]; then
+		ok "all $n category tags on this box have a CATEGORY_LABELS entry"
+	else
+		bad "netifyd carries category tags the frontend cannot translate:$missing"
+	fi
+}
+
 test_acl() {
 	head2 "ACL grants no more than the package uses"
 	A=/usr/share/rpcd/acl.d/luci-app-appflow.json
@@ -361,7 +411,9 @@ case "$GROUP" in
 	conntrack)    test_conntrack ;;
 	restart)      test_restart ;;
 	acl)          test_acl ;;
-	all)          test_health; test_conservation; test_conntrack; test_restart; test_acl ;;
+	categories)   test_categories ;;
+	all)          test_health; test_conservation; test_conntrack
+	              test_restart; test_acl; test_categories ;;
 	*)            printf "unknown group '%s'\n" "$GROUP"; exit 2 ;;
 esac
 
