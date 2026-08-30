@@ -32,6 +32,23 @@ const { load, potMsgids, textOf, classesOf } = require('./luci-module.js');
 const ROOT = path.join(__dirname, '..');
 const COMMON = path.join(ROOT, 'htdocs/luci-static/resources/view/appflow/common.js');
 const POT = path.join(ROOT, 'po/templates/appflow.pot');
+const DAEMON = path.join(ROOT, 'root/usr/sbin/appflowd');
+
+// The category column of the daemon's AI_HOSTS table, read out of the daemon
+// source itself. This is the only cross-file contract the browser half has: if
+// the daemon emits a category the frontend has no key for, the label is
+// untranslatable and nothing else in either suite notices.
+//
+// Deliberately a text scan rather than a fixture. A fixture would record what
+// the daemon USED to send, which is exactly the failure being guarded against.
+function daemonAiCategories() {
+	const src = require('fs').readFileSync(DAEMON, 'utf8');
+	const out = new Set();
+	const re = /\[\s*"[^"]*"\s*,\s*"(ai-[a-z-]+|AI [a-z]+)"\s*,/g;
+	let m;
+	while ((m = re.exec(src)) !== null) out.add(m[1]);
+	return [...out].sort();
+}
 
 let PASS = 0, FAIL = 0;
 
@@ -148,6 +165,11 @@ head('LABELS: netifyd slugs are cased, deliberate casing is left alone');
 // "Ai assistants", because the title-case split is on [-_] and a space is
 // neither. It rendered that way on a live router before anyone noticed.
 //
+// Since 1.1.1 the daemon sends those four as slugs, so no category the daemon
+// actually emits reaches the pass-through any more. It is kept because it is
+// the guard for anything NOT in the table, and these two inputs exercise it
+// directly.
+//
 // SABOTAGE: remove the /[A-Z]/ pass-through in catLabel(). The first two go
 // red and the netifyd cases stay green, which is the distinction that matters.
 chk('a category with deliberate capitals is left alone',
@@ -158,6 +180,161 @@ chk('and so is a second one', 'AI infrastructure', c.catLabel('AI infrastructure
 chk('a lowercase netifyd slug is still title-cased', 'Networking', c.catLabel('networking'));
 chk('and a hyphenated one still splits', 'Social Network', c.catLabel('social-network'));
 chk('an empty category is still Unclassified', 'Unclassified', c.catLabel(''));
+
+head('LABELS ARE TRANSLATABLE, WHICH IS NOT WHAT THE CHECKS ABOVE PROVE');
+
+// THE DEFECT, found 2026-08-30, reported by @ntbowen against 1.1.0.
+//
+// READ THIS BEFORE ADDING A CHECK ABOVE INSTEAD OF HERE. Every assertion in
+// the group above is satisfied identically by two implementations, one of
+// which is broken:
+//
+//     catLabel('networking') -> _('Networking')          translatable
+//     catLabel('networking') -> 'networking'.replace(…)  English for ever
+//
+// Both return the string 'Networking', so `chk(…, 'Networking', …)` passes on
+// either. The difference IS the feature, and an equality assertion cannot see
+// it. Three separate label paths shipped broken underneath a green run of this
+// file, including its own catalogue check, which asserts that every string
+// reaching _() is in the .pot and is therefore blind by construction to a
+// string that never reaches _() at all.
+//
+// The observable that distinguishes them is not the output, it is WHETHER _()
+// WAS CALLED. tests/luci-module.js records every string the module passes to
+// _() as it loads, so the assertion is membership in that set.
+//
+// NETIFYD_TAGS is a deliberate second copy, read off the bench from
+// /etc/netify.d/netify-categories.json on netifyd 4.4.7 (32 application tags
+// + 18 protocol tags, 43 unique). It must NOT be imported from the product,
+// or this check becomes a tautology that compares the table with itself.
+const NETIFYD_TAGS = [
+	'adult', 'advertiser', 'authentication', 'business', 'cdn', 'cybersecurity',
+	'database', 'device-iot', 'education', 'entertainment', 'file-server',
+	'file-sharing', 'financial', 'gambling', 'games', 'government', 'hosting',
+	'infrastructure', 'mail', 'malware', 'media', 'media-provider', 'messaging',
+	'networking', 'news', 'os-software-updates', 'portal', 'printing', 'proxy',
+	'recreation', 'reference', 'remote-desktop', 'shopping', 'social-media',
+	'sports', 'streaming-media', 'technology', 'telco', 'unclassified', 'voip',
+	'vpn', 'vpn-and-proxy', 'web'
+];
+
+const translated = new Set(c.__translated.filter(Boolean));
+
+// A membership check against an empty set passes vacuously. Refuse to report
+// on one, the same way the catalogue check below does.
+if (translated.size === 0) {
+	bad('the run reached NO _() strings, so nothing below proves anything');
+} else {
+	// SABOTAGE: delete any one entry from CATEGORY_LABELS in common.js. The
+	// title-caser still returns the same English text and every equality check
+	// above stays green; this goes red and names the tag.
+	const untranslatable = NETIFYD_TAGS.filter((t) => !translated.has(c.catLabel(t)));
+	if (untranslatable.length === 0)
+		ok(`all ${NETIFYD_TAGS.length} netifyd category tags return a string that went through _()`);
+	else
+		bad(`${untranslatable.length} category tag(s) produce a label _() never saw, `
+		    + `so they are English in every language: ${JSON.stringify(untranslatable)}`);
+
+	// The daemon's own AI categories, which is where WE introduced this bug
+	// rather than inheriting it. Until 1.1.1 appflowd sent 'AI assistants' and
+	// three siblings as rendered English, and catLabel returned them untouched.
+	//
+	// TWO ASSERTIONS, AND THE FIRST ONE IS NOT REDUNDANT. The membership test
+	// alone cannot catch this: catLabel('AI media') falls through the
+	// pass-through and returns 'AI media' unchanged, and that exact string IS
+	// in the translated set, because the table entry 'ai-media': _('AI media')
+	// put it there. So a daemon that reverted to display strings would satisfy
+	// a membership check while being exactly as broken as before. That was the
+	// first version of this check and an executed sabotage caught it, which is
+	// the only reason it is written this way.
+	//
+	// SABOTAGE A: change one AI_HOSTS category in appflowd back to a display
+	// string, e.g. 'ai-media' -> 'AI media'. The shape check goes red.
+	// SABOTAGE B: change one to a slug with no table entry, e.g. 'ai-video'.
+	// The membership check goes red.
+	const SLUG = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+	const daemonCats = daemonAiCategories();
+	if (daemonCats.length < 4) {
+		bad(`read only ${daemonCats.length} AI categories out of appflowd; expected 4`);
+	} else {
+		const shaped = daemonCats.filter((t) => !SLUG.test(t));
+		if (shaped.length === 0)
+			ok(`all ${daemonCats.length} AI categories the daemon emits are lowercase slugs`);
+		else
+			bad(`the daemon emits pre-rendered display string(s) ${JSON.stringify(shaped)}; `
+			    + 'a category that arrives already in English has no key to look up');
+
+		const unknown = daemonCats.filter((t) => !translated.has(c.catLabel(t)));
+		if (unknown.length === 0)
+			ok(`and the frontend has a _() label for all ${daemonCats.length} of them`);
+		else
+			bad(`the daemon emits ${JSON.stringify(unknown)}, which the frontend `
+			    + 'has no CATEGORY_LABELS entry for');
+	}
+
+	// The three synthetic pseudo-devices. The daemon sends their display name
+	// already rendered in English because it has no idea what language the
+	// browser wants, so the frontend must name them from the stable key.
+	//
+	// SABOTAGE: delete an entry from DEVICE_LABELS, or key the lookup on the
+	// daemon's name instead of t.key. This goes red.
+	[ 'router', 'unknown', 'multicast' ].forEach(function(key) {
+		const d = c.normDevice({ key: key, name: 'SHOULD NOT BE USED' });
+		if (translated.has(d.name))
+			ok(`pseudo-device '${key}' is named through _(), not from the daemon's English`);
+		else
+			bad(`pseudo-device '${key}' rendered ${JSON.stringify(d.name)}, `
+			    + 'which _() never saw');
+	});
+}
+
+// A real device must NOT be captured by that table: its name comes from the
+// DHCP lease and is not a translatable string.
+//
+// SABOTAGE: drop the hasOwnProperty guard and key the lookup on the name.
+chk('a real device still uses the name the daemon resolved', 'kitchen-pi',
+    c.normDevice({ key: 'b4:2e:99:3a:d6:df', mac: 'b4:2e:99:3a:d6:df',
+                   name: 'kitchen-pi' }).name);
+
+// Both label tables are plain object literals, so they inherit
+// Object.prototype and a bare lookup on an inherited key returns a truthy
+// non-string. t.name is assumed to be a string by the .toUpperCase() two lines
+// later in normDevice, and a label is assumed to be a string by every caller.
+//
+// Raised independently by two reviewers against the contributor's patch, which
+// used a bare `DEVICE_LABELS[key] ||` lookup. color() in the same file already
+// guarded its own table this way; catLabel() did not.
+//
+// THESE PROBES FEED HOSTILE INPUT, SO THEY MUST NOT BE ALLOWED TO THROW
+// UNCAUGHT. Removing the guard makes normDevice raise a TypeError rather than
+// return a bad value, and an uncaught throw here would abort the whole file:
+// node prints a stack trace, every later check never runs, and the summary
+// line that says how many passed is never printed at all. The run is still red
+// by exit code, but "red" and "red naming the defect, with the other 60 checks
+// still reported" are different things. attempt() turns a throw into a named
+// failure and lets the suite finish.
+//
+// SABOTAGE: replace either hasOwnProperty guard with a bare truthiness test.
+// Every probe below goes red, by value for catLabel and by throw for
+// normDevice, and the checks after this block still report.
+function attempt(desc, fn) {
+	let v;
+	try {
+		v = fn();
+	} catch (e) {
+		bad(`${desc} threw ${e && e.name}: ${e && e.message}`);
+		return;
+	}
+	if (typeof v === 'string') ok(desc);
+	else bad(`${desc} produced a ${typeof v}, not a string`);
+}
+
+[ '__proto__', 'constructor', 'toString', 'hasOwnProperty' ].forEach(function(k) {
+	attempt(`catLabel(${JSON.stringify(k)}) returns a string`,
+	        () => c.catLabel(k));
+	attempt(`normDevice key ${JSON.stringify(k)} names a string`,
+	        () => c.normDevice({ key: k, mac: 'aa:bb:cc:dd:ee:ff' }).name);
+});
 
 head('NORMALISERS: idempotent, and never inventing a total');
 

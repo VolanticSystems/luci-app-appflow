@@ -274,6 +274,65 @@ Three fields there answer most questions:
 housekeeping of idle flows and is expected to be large. Reading them as one
 number hides cap pressure underneath normal behavior.
 
+## Security and privacy
+
+Traffic monitoring is a privacy question by definition, so here is the whole
+surface. Everything below is checkable in `root/usr/sbin/appflowd` and
+`root/usr/share/rpcd/acl.d/luci-app-appflow.json`.
+
+**It runs as root, because it has to.** The daemon reads netifyd's agent socket
+and `/proc/net/nf_conntrack`, neither of which is readable otherwise. There is
+no privilege drop. If that is not acceptable on your box, do not install it.
+
+**It reads four files and writes none.** `/etc/netify.d/netify-categories.json`,
+`/tmp/dhcp.leases`, `/var/run/netifyd/status.json` and `/proc/net/nf_conntrack`,
+all read-only, plus its own UCI config at start-up. It contains no `writefile`,
+no shell-out and no `popen`. It opens no listening socket: it connects out to
+netifyd's Unix socket and publishes a ubus object, which is the local bus and
+not the network.
+
+**Nothing is stored.** There is no database, no log of who visited what, no
+spool file. Every counter lives in memory and dies with the process, so
+`/etc/init.d/appflowd restart` is a complete erase. That is also the honest
+limitation: there is no history, and restarting the router loses the day.
+
+**The ubus surface is six read methods and one write, and the write is
+`reset`.** The ACL is deliberately narrower than the daemon:
+
+| method | granted to the web UI | what it returns |
+|---|---|---|
+| `summary`, `stats`, `status` | yes | totals, time series, health |
+| `devices`, `apps` | yes | per-device and per-application aggregates |
+| `app_detail` | yes | one application: its devices, and the hostnames it contacted, each with byte totals |
+| `flows` | **no** | the live per-connection table, including remote addresses and ports |
+| `reset` | yes (write) | clears the counters |
+
+**`flows` is ungranted on purpose and the reason is written into the ACL file
+itself.** That is the difference between a dashboard and a surveillance log. A
+LuCI session can see that a device used a streaming service and that the
+service contacted a set of hostnames; it cannot pull the connection table and
+join a specific device to a specific remote endpoint, because `app_detail`
+returns devices and hostnames as two separate lists for one application rather
+than as a cross product.
+
+**What the dashboard does reveal**, so nobody is surprised: DHCP hostnames, MAC
+and IP addresses of LAN devices, which applications each device used, and the
+TLS SNI hostnames each application contacted. Anyone who can log into LuCI can
+see all of it. On a family router that is a real consideration and it is your
+call, not the package's.
+
+**Bounded tables that refuse rather than lie.** Aggregate tables are capped. At
+the cap the daemon evicts only entries with no live flow, and when every slot is
+busy it refuses to grow rather than dropping data that is still arriving, so the
+totals stay correct while the breakdown goes incomplete. That refusal used to be
+invisible; it is now counted and reported as `aggregates.refused`, because a
+table that has quietly stopped accepting new devices looks identical to a quiet
+network.
+
+**Reporting something.** If you find a problem, open an issue on the repository,
+or send it privately if you would rather not post it. Either is fine, and either
+gets an answer.
+
 ## Tests
 
 Three suites, 179 checks, no failures. Two need a sandbox router; one needs

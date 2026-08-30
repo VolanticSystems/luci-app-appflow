@@ -704,13 +704,23 @@ table. On a hit the application key, label, tag and category are replaced.
 key    ai:anthropic-claude
 name   Anthropic (Claude)
 tag    appflow.anthropic-claude
-cat    AI assistants
+cat    ai-assistants
 ```
 
-Four categories: `AI assistants`, `AI media`, `AI developer`,
-`AI infrastructure`. The last covers aggregators, inference APIs, GPU rental
+Four categories: `ai-assistants`, `ai-media`, `ai-developer`,
+`ai-infrastructure`. The last covers aggregators, inference APIs, GPU rental
 and vector stores, which are different businesses but one thing from a
 network's point of view.
+
+**The category is a SLUG on the wire, and 1.1.0 got this wrong.** It shipped
+`AI assistants` and its three siblings as display strings, which read correctly
+in English and could therefore never be translated: the browser renders a
+category by looking the slug up in a table of `_()` literals, and a string that
+arrives already rendered has no key to look up. Every netifyd category travels
+as a lowercase slug; these four were the only ones that did not, and they were
+ours. Corrected in 1.1.1. `frontend-suite.js` now reads this table out of the
+daemon source and fails if a category is emitted that the frontend cannot
+translate, so the two halves cannot drift apart again.
 
 **Keyed on the vendor label, not the matched domain.** `anthropic.com` and
 `claude.ai` are one vendor and must aggregate into one row; keying on the
@@ -802,28 +812,38 @@ because `logread` is a RING whose line count stops growing once it is full. A
 unique marker written with `logger` is immune to both. See
 `tests/protocol-suite.sh hostmap`.
 
-## 13. Queued for 1.1.1
+## 13. Shipped in 1.1.1: labels that could not be translated
 
-Two small things found by a user watching a live dashboard, where one streaming
-session buried everything else.
+Every item that stood in this section as "queued for 1.1.1" shipped in 1.1.0
+instead (commit `b8ca31d`): the search placeholder, exclude terms, and the
+clickable donut. The section was left describing them as pending for three
+weeks. What actually became 1.1.1 is below.
 
-**The search box hides a feature it already has.** `statistics.js` filters on
-the application label, the key AND the category label, so typing "AI" already
-narrows the table to the AI categories. The placeholder reads "Search app
-name", so nobody would ever discover that. A one-string fix, and arguably a
-defect rather than an enhancement: the capability is shipped and the label
-conceals it.
+**A label is only translatable if a literal reaches `_()`.** That is what the
+`.pot` extractor scans for, and three separate paths produced labels that never
+did. All three were invisible to a green test run, and all three were reported,
+directly or indirectly, by a first-time contributor's translation pull request.
 
-**There is no way to exclude.** Filtering is include-only, so "show me
-everything except Netflix" cannot be expressed. That is exactly what you want
-when a single high-rate flow dominates the view, which is the situation that
-prompted the question.
+**`catLabel()` held 12 entries and title-cased the rest at runtime.** That is
+string manipulation, not translation: `web` became `Web` by algorithm, in
+English, in every language. The live netifyd category file carries 43 tags
+across its application and protocol indexes. The table now holds all of them.
 
-**Clicking a category in the donut should filter to it.** The obvious gesture,
-and it does nothing today.
+**The daemon names its three synthetic pseudo-devices in English**, because a
+daemon has no idea what language a browser wants. The frontend now maps the
+stable key it sends, not the name, so a daemon-side rewording cannot silently
+revert the translation.
 
-None of these were held for 1.1.0: bolting a new interaction model onto the
-statistics view at the end of a release is how a release slips or breaks.
+**The AI categories were ours, not inherited.** See section 12.
+
+The interesting part is why no test caught it. `frontend-suite.js` asserted
+that `catLabel('networking')` returns `'Networking'`, which is satisfied
+identically by a `_()` lookup and by a title-caser, and it asserted that every
+string reaching `_()` is in the catalogue, which is blind by construction to a
+string that never reaches `_()`. The new group asserts **membership in the set
+of strings the module actually passed to `_()`**, recorded by the harness as it
+loads. Six product edits were executed against it to confirm each check can
+fail; two of those runs found defects in the test rather than the product.
 
 ## 14. Filtering and the drill-down
 
