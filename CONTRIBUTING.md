@@ -201,3 +201,19 @@ settle them:
    `flow_stats` / detection-update ordering would settle it.
 
 Reports of either, even without a patch, are genuinely valuable.
+
+### A note for translators: argument order
+
+LuCI's `format()` substitutes positionally in order, so a translation that needs
+the arguments in a different order than English must say so explicitly. Use
+`%1$d`, `%2$s` and so on rather than bare `%d`/`%s`:
+
+    msgid  "%d of %d applications"        call site passes (shown, total)
+    wrong  "共 %d 个应用中的 %d 个"          renders 143 of a total of 7
+    right  "共 %2$d 个应用中的 %1$d 个"
+
+**This class of bug passes every check either side can run.** Argument order is
+a property of the relationship between the string and its call site, and the
+call site is in another file, so a specifier count matches, a markup sweep finds
+nothing, and the build is green. Found in the zh_Hans catalogue in PR #1, where
+it turned "7 of 143" into "143 of a total of 7".
