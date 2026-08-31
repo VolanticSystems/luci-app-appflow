@@ -1094,6 +1094,144 @@ app_cat() {
 	printf '%s' "${v:-MISSING}"
 }
 
+# Bytes on one device aggregate. MISSING on a miss, never 0, so a helper that
+# cannot find its subject turns its check red instead of comparing two blanks.
+dev_bytes() {
+	local v
+	v=$(ubus call appflow devices '{"limit":20}' 2>/dev/null |
+	    jsonfilter -e "@.devices[@.key=\"$1\"].bytes_total" | head -1)
+	printf '%s' "${v:-MISSING}"
+}
+
+# A WAN-side flow the router itself originated: local_* is the router's own
+# address and MAC, which is what makes is_router() true for the local side.
+router_flow() {
+	printf '{"type":"flow","internal":false,"interface":"wan","flow":{"digest":"%s","local_ip":"%s","local_mac":"%s","other_ip":"93.184.216.34","other_mac":"02:00:00:00:00:ff","local_port":40001,"other_port":443,"ip_protocol":6,"detected_application":0,"detected_application_name":"","detected_protocol":91,"detected_protocol_name":"TLS","category":{"application":10,"protocol":20},"local_bytes":0,"other_bytes":0,"total_bytes":0}}\n' \
+		"$1" "$RIP" "$RMAC"
+	printf '{"type":"flow_stats","internal":false,"interface":"wan","flow":{"digest":"%s","local_ip":"%s","local_mac":"%s","other_ip":"93.184.216.34","other_mac":"02:00:00:00:00:ff","local_bytes":%s,"other_bytes":%s,"total_bytes":%s}}\n' \
+		"$1" "$RIP" "$RMAC" "$2" "$3" "$4"
+}
+
+# A second stats event on an existing router flow, carrying a larger cumulative
+# counter. This is the update that used to discard the flow.
+router_stats() {
+	printf '{"type":"flow_stats","internal":false,"interface":"wan","flow":{"digest":"%s","local_ip":"%s","local_mac":"%s","other_ip":"93.184.216.34","other_mac":"02:00:00:00:00:ff","local_bytes":%s,"other_bytes":%s,"total_bytes":%s}}\n' \
+		"$1" "$RIP" "$RMAC" "$2" "$3" "$4"
+}
+
+test_router_origin() {
+	head2 "ROUTER-ORIGINATED TRAFFIC SURVIVES CONNTRACK FORGETTING THE FLOW"
+
+	# THE DEFECT, found 2026-08-31 on BOTH routers. The "Router" pseudo-device
+	# had never counted a single byte in production: 107,476 flows where
+	# conntrack positively confirmed the router originated the traffic, and a
+	# device row reading zero. The dashboard then correctly hides a zero-byte
+	# device, so the feature was invisibly absent rather than visibly broken.
+	#
+	# The mechanism, measured with temporary counters in the daemon rather than
+	# reasoned about: flow_identify() asks conntrack, gets a positive "the
+	# router originated this", keeps the flow and attaches it. Then the FIRST
+	# flow_stats event runs reshadow(), which asks the same question again. By
+	# then the connection has often closed and its conntrack entry is gone, so
+	# the answer is "unknown", and the code treated unknown as grounds to
+	# discard. Absence of evidence overrode a positive determination already
+	# made. That is the same mistake statusStrip() carries a comment about.
+	#
+	# This test pins the ordering that matters: resolve once, then let conntrack
+	# forget, and the bytes must still land.
+	local RIP RMAC CT
+	CT=/tmp/appflow-ct-fixture
+	RIP=$(jsonfilter -i /var/run/netifyd/status.json -e '@.interfaces.wan.addr[0]' 2>/dev/null)
+	case "$RIP" in
+		*.*) : ;;
+		*) RIP=$(jsonfilter -i /var/run/netifyd/status.json -e '@.interfaces.wan.addr[1]' 2>/dev/null) ;;
+	esac
+	RMAC=$(jsonfilter -i /var/run/netifyd/status.json -e '@.interfaces.wan.mac' 2>/dev/null)
+
+	if [ -z "$RIP" ] || [ -z "$RMAC" ]; then
+		skip "no WAN address/mac in netifyd status; cannot forge a router flow"
+		return
+	fi
+	note "router WAN identity: $RIP / $RMAC"
+
+	# A conntrack line in the kernel's own format. The daemon keys on the REPLY
+	# tuple and decides "was the source translated" by comparing the ORIGINAL
+	# src against the REPLY dst. Equal means no NAT, i.e. the router itself
+	# opened this connection.
+	printf 'ipv4 2 tcp 6 431999 ESTABLISHED src=%s dst=93.184.216.34 sport=40001 dport=443 packets=4 bytes=400 src=93.184.216.34 dst=%s sport=443 dport=40001 packets=4 bytes=400 [ASSURED] mark=0 zone=0 use=2\n' \
+		"$RIP" "$RIP" > "$CT"
+
+	uci set appflow.main.conntrack_path="$CT"
+	uci commit appflow
+
+	# An internal flow first, so saw_internal is true: without it the whole
+	# shadow path is skipped and this test would pass against a daemon that had
+	# never worked. Then the router's own flow, and a SECOND stats update on it,
+	# because the second update is what used to destroy the flow.
+	#
+	# local_bytes/other_bytes are per-update deltas; total_bytes is cumulative.
+	{
+		hello
+		flow_ev RO000001 1001 lan-client 400 600 1000 true 02:00:00:00:00:aa
+		router_flow RO000002 700 1300 2000
+		router_stats RO000002 700 1300 4000
+	} > "$EV"
+	feed_and_settle || { uci delete appflow.main.conntrack_path; uci commit appflow; return; }
+
+	# The conntrack block is the instrument this test depends on. Print it: a
+	# run where entries is 0 or available is null is not a failing product, it
+	# is a test that never armed, and the two must not look alike in the log.
+	note "conntrack: $(ubus call appflow status 2>/dev/null | jsonfilter -e '@.conntrack' 2>/dev/null)"
+
+	# THE SABOTAGE FOR THIS ONE IS BOTH HALVES OF THE FIX, NOT EITHER, and that
+	# was established by running it rather than by reasoning. Reverting only the
+	# ct_nat_twin() port lookup leaves this GREEN, because the fr.ct_local guard
+	# then rescues the flow; reverting only the guard leaves it green too,
+	# because the lookup succeeds. Revert both -- key off `f.local_port` again
+	# AND drop the `if (fr.ct_local) return;` -- and this reads 0, which is what
+	# every release up to and including 1.1.1 did.
+	#
+	# The check below is the one that isolates the root cause on its own.
+	chk "a router-originated flow reaches the router device" "4000" "$(dev_bytes router)"
+
+	# Same run, different question: the counter must show the lookup SUCCEEDING
+	# on the update, not merely that some bytes arrived. unresolved > 0 here
+	# means the key is not matching even though the entry is present.
+	#
+	# SABOTAGE: revert ct_nat_twin() to keying off `f.local_port`/`f.other_port`
+	# instead of the ports stored on the flow record. A flow_stats event carries
+	# no ports, so the key gains two empty fields and matches nothing. This is
+	# the precise detector for the shipped defect, and it fires on that revert
+	# alone even while the check above stays green.
+	chk "and conntrack resolved every re-check" "0" \
+	    "$(ubus call appflow status 2>/dev/null | jsonfilter -e '@.conntrack.unresolved' 2>/dev/null)"
+
+	# THE MIRROR, and it is the one that matters most. A fix that simply stopped
+	# shadowing would pass both checks above and reintroduce the double-count
+	# this whole mechanism exists to prevent: a WAN-side copy of a NAT-ed client
+	# measured at 163-199% of wire truth. With conntrack unable to confirm the
+	# router originated anything, the flow must still be discarded.
+	#
+	# SABOTAGE: make reshadow() return unconditionally for dev_key "router".
+	# The two checks above stay green and this goes red.
+	: > "$CT"
+	{
+		hello
+		flow_ev RO000011 1001 lan-client 400 600 1000 true 02:00:00:00:00:aa
+		router_flow RO000012 700 1300 2000
+		router_stats RO000012 700 1300 4000
+	} > "$EV"
+	feed_and_settle
+
+	note "with an empty conntrack: router = $(dev_bytes router)"
+	chk "an unconfirmable router flow is still shadowed, not counted" \
+	    "MISSING" "$(dev_bytes router)"
+
+	uci delete appflow.main.conntrack_path 2>/dev/null
+	uci commit appflow
+	rm -f "$CT"
+}
+
 test_ai_breakout() {
 	head2 "AI BREAKOUT (hostname matching, and the things it must NOT match)"
 
@@ -1721,11 +1859,13 @@ case "$GROUP" in
 	lifecycle)    test_lifecycle ;;
 	acl)          test_acl ;;
 	ai)           test_ai_breakout ;;
+	router)       test_router_origin ;;
 	hostmap)      test_hostmap ;;
 	drilldown)    test_drilldown ;;
 	all)          test_conservation; test_protocol; test_bounds
 	              test_attribution; test_hostile; test_lifecycle; test_acl
-	              test_ai_breakout; test_hostmap; test_drilldown ;;
+	              test_ai_breakout; test_hostmap; test_drilldown
+	              test_router_origin ;;
 	*)            printf "unknown group '%s'\n" "$GROUP"; exit 2 ;;
 esac
 

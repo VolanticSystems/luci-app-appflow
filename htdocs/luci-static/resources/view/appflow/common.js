@@ -809,7 +809,20 @@ return baseclass.extend({
 	},
 
 	tile: function(label, category, tag) {
-		var s = String(label || '').replace(/^[^0-9A-Za-z]+/, ''),
+		/* STRIP ON A UNICODE CLASS, NOT ON ASCII. This used to be
+		 * /^[^0-9A-Za-z]+/, which eats every leading character that is not an
+		 * ASCII letter or digit. A name written in any non-Latin script is
+		 * entirely non-ASCII, so the strip consumed the whole string, `s` came
+		 * out empty and every such device and application rendered a '?' tile.
+		 *
+		 * That was not a translation bug: it hit any LAN client whose DHCP
+		 * hostname was Chinese, Japanese, Korean, Russian, Greek, Arabic or
+		 * Hebrew, on every release. Accepting the zh_Hans catalogue would have
+		 * made it universal rather than occasional, which is how it was found.
+		 *
+		 * \p{L} and \p{N} need the /u flag. toUpperCase() is a no-op on
+		 * scripts without case, which is correct rather than merely harmless. */
+		var s = String(label || '').replace(/^[^\p{L}\p{N}]+/u, ''),
 		    ch = s.length ? s.charAt(0).toUpperCase() : '?',
 		    icon = this.iconFor(tag),
 		    node = E('span', {

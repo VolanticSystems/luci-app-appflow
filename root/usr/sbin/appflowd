@@ -70,6 +70,7 @@ const CT_MAX = 8192;             // entries kept from one snapshot (memory bound
 
 const CFG_DEFAULTS = {
 	socket_path: "/var/run/netifyd/netifyd.sock",
+	conntrack_path: "/proc/net/nf_conntrack",
 	flow_max: 4096,
 	rate_window: 30,
 	top_n: 10,
@@ -285,6 +286,7 @@ function cfg_load() {
 
 	cfg = {
 		socket_path: length(s.socket_path ?? "") ? s.socket_path : CFG_DEFAULTS.socket_path,
+		conntrack_path: length(s.conntrack_path ?? "") ? s.conntrack_path : CFG_DEFAULTS.conntrack_path,
 		flow_max: clampi(num(s.flow_max, CFG_DEFAULTS.flow_max), 64, 65536),
 		rate_window: clampi(num(s.rate_window, CFG_DEFAULTS.rate_window), 5, 600),
 		top_n: clampi(num(s.top_n, CFG_DEFAULTS.top_n), 1, 100),
@@ -889,7 +891,7 @@ function ct_load(now, force) {
 	// the CT_MAX break now stops the work as well as the retention.
 	let fd;
 	try {
-		fd = fs.open(CONNTRACK_FILE, "r");
+		fd = fs.open(cfg.conntrack_path ?? CONNTRACK_FILE, "r");
 	} catch (e) {
 		fd = null;
 	}
@@ -900,7 +902,7 @@ function ct_load(now, force) {
 			conntrack.entries = 0;
 			logonce("ct-missing", "warn",
 			        "%s unreadable: cannot distinguish a NAT twin from router-originated traffic, so external captures are shadowed while an internal capture runs. Client accounting stays correct; the router's own traffic is not attributed.",
-			        CONNTRACK_FILE);
+			        cfg.conntrack_path ?? CONNTRACK_FILE);
 		}
 		return;
 	}
@@ -938,9 +940,27 @@ function ct_load(now, force) {
 // true  = this external capture is the WAN-side twin of a NAT-ed LAN flow
 // false = conntrack positively says the router originated it
 // null  = conntrack cannot say (absent, unreadable, or the entry has expired)
-function ct_nat_twin(f, now) {
+function ct_nat_twin(f, now, fr) {
+	// THE PORTS COME FROM THE FLOW RECORD, NOT THE EVENT, AND THAT IS THE WHOLE
+	// FIX. netifyd puts local_port/other_port on the initial `flow` event and
+	// on nothing afterwards: a `flow_stats` payload carries addresses and byte
+	// counters only. This key was built straight off the event, so every call
+	// made from an update produced "...|93.184.216.34|192.168.72.10||" with two
+	// empty fields, matched nothing, and returned null.
+	//
+	// Nothing detected that. reshadow() treats null as grounds to discard, so
+	// EVERY router-originated flow was shadowed on its first stats update, and
+	// the "Router" device counted zero bytes on every install since 1.0.x. The
+	// dashboard then correctly hides a zero-byte device, so the feature was
+	// absent rather than visibly broken. Production had logged 107,476
+	// positive identifications against a row reading zero for 2.6 days.
+	//
+	// Found 2026-08-31 by instrumenting the daemon after the row was noticed
+	// missing on the bench. See tests/protocol-suite.sh `router`.
+	let lp = (fr != null && fr.local_port != null) ? fr.local_port : f.local_port;
+	let op = (fr != null && fr.other_port != null) ? fr.other_port : f.other_port;
 	let key = (f.other_ip ?? "") + "|" + (f.local_ip ?? "") + "|" +
-	          (f.other_port ?? "") + "|" + (f.local_port ?? "");
+	          (op ?? "") + "|" + (lp ?? "");
 	ct_load(now, false);
 	let v = conntrack.entries ? conntrack.map[key] : null;
 	// A miss usually means the flow is newer than the snapshot, because netifyd
@@ -1241,6 +1261,12 @@ function flow_identify(fr, ev, f, now) {
 	//  - on an internal (LAN bridge) capture the device is the non-router side;
 	//  - on an external (WAN) capture our own box is the device and the peer is
 	//    upstream infrastructure, so the device is the router-owned side.
+	// Ports only ever arrive on the initial `flow` event. Keep them on the
+	// record so conntrack can still be asked about this flow later; see
+	// ct_nat_twin().
+	if (f.local_port != null) fr.local_port = f.local_port;
+	if (f.other_port != null) fr.other_port = f.other_port;
+
 	let lm = lc(f.local_mac ?? ""), om = lc(f.other_mac ?? "");
 	let rl = is_router(lm, f.local_ip), ro = is_router(om, f.other_ip);
 	let dev_local = ev.internal ? !(rl && !ro) : !(ro && !rl);
@@ -1300,8 +1326,10 @@ function flow_identify(fr, ev, f, now) {
 		if (!dev_is_router)
 			want_shadow = true;
 		else {
-			let twin = ct_nat_twin(f, now);
+			let twin = ct_nat_twin(f, now, fr);
 			want_shadow = (twin != false);
+			if (twin == false)
+				fr.ct_local = true;   // a positive finding, remembered
 			if (twin == null)
 				stats.ct_unresolved++;
 			else if (twin)
@@ -1383,15 +1411,24 @@ function reshadow(fr, f, now) {
 		// counted alongside its internal twin for the flow's whole remaining
 		// life, and stats.shadowed never moved because there was no transition.
 		// Ask conntrack, exactly as flow_identify does, and default the same way.
-		let twin = ct_nat_twin(f, now);
+		let twin = ct_nat_twin(f, now, fr);
 		if (twin == false) {
 			stats.ct_local++;
 			return;                  // conntrack says the router originated it
 		}
-		if (twin == null)
+		if (twin == null) {
 			stats.ct_unresolved++;
-		else
+			// ABSENT EVIDENCE IS NOT POSITIVE EVIDENCE, the same rule
+			// statusStrip() carries a comment about. If conntrack already told
+			// us this flow was router-originated, a later lookup that cannot
+			// answer -- because the connection closed and the entry aged out --
+			// is not a reason to throw the flow away. Only a positive "this is
+			// a NAT twin" below may overturn it.
+			if (fr.ct_local)
+				return;
+		} else {
 			stats.ct_twins++;
+		}
 	}
 	flow_detach(fr);
 	fr.shadow = true;
