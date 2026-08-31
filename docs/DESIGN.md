@@ -812,7 +812,56 @@ because `logread` is a RING whose line count stops growing once it is full. A
 unique marker written with `logger` is immune to both. See
 `tests/protocol-suite.sh hostmap`.
 
-## 13. Shipped in 1.1.1: labels that could not be translated
+## 13. Shipped in 1.1.2: the Router row had never counted a byte
+
+**The most serious defect this package has had, and it was invisible by
+construction.** On both routers checked, the `router` pseudo-device reported
+exactly zero bytes. Production had logged **107,476** flows where conntrack
+positively confirmed the router originated the traffic, against a device row
+reading zero for 2.6 days and 52 GB. The dashboard correctly hides a zero-byte
+device, so the feature was absent rather than visibly broken, and nobody
+noticed for the life of the package.
+
+**The cause is one line and it is worth stating precisely.** `ct_nat_twin()`
+built its lookup key from the event it was handed:
+
+    other_ip | local_ip | other_port | local_port
+
+netifyd puts the ports on the initial `flow` event and on nothing afterwards. A
+`flow_stats` payload carries addresses and byte counters only. So the key built
+from an update had two empty fields, matched nothing, and returned `null`.
+`reshadow()` treats `null` as grounds to discard, so every router-originated
+flow was shadowed on its first stats update, before a single byte reached the
+aggregate. `flow_identify()` resolved it correctly, once, and the next event
+threw the answer away.
+
+The fix has two halves, and they are independently sufficient, which is why the
+tests distinguish them:
+
+- **The ports are stored on the flow record** and the lookup prefers them. This
+  is the root cause and the check on `conntrack.unresolved` isolates it.
+- **A positive finding is remembered.** `fr.ct_local` records that conntrack
+  once said the router originated this flow, and a later lookup that cannot
+  answer no longer overturns it. Only a positive "this is a NAT twin" may.
+  Absent evidence is not positive evidence, the same rule §5 already states
+  about `statusStrip()`.
+
+**The dedup is deliberately unchanged.** A fix that simply stopped shadowing
+would restore the 163-199% over-count this mechanism exists to prevent, so the
+suite asserts that a router flow conntrack cannot confirm is still discarded.
+
+`conntrack_path` became a config option purely so this is testable, exactly as
+`socket_path` already was. The `router` group in `protocol-suite.sh` supplies a
+conntrack fixture and drives the real daemon.
+
+**Also in 1.1.2: tile letters outside ASCII.** `tile()` stripped with
+`/^[^0-9A-Za-z]+/`, which consumes a name written in any non-Latin script
+entirely and falls through to `?`. Every Chinese, Japanese, Korean, Russian,
+Greek, Arabic and Hebrew name rendered an identical question mark. Not a
+translation bug: any LAN client with a non-Latin DHCP hostname hit it on every
+release. Now stripped on `\p{L}\p{N}` with the `/u` flag.
+
+## 14. Shipped in 1.1.1: labels that could not be translated
 
 Every item that stood in this section as "queued for 1.1.1" shipped in 1.1.0
 instead (commit `b8ca31d`): the search placeholder, exclude terms, and the
@@ -845,7 +894,7 @@ of strings the module actually passed to `_()`**, recorded by the harness as it
 loads. Six product edits were executed against it to confirm each check can
 fail; two of those runs found defects in the test rather than the product.
 
-## 14. Filtering and the drill-down
+## 15. Filtering and the drill-down
 
 ### 14.1 Where the logic lives, and why
 

@@ -181,6 +181,38 @@ chk('a lowercase netifyd slug is still title-cased', 'Networking', c.catLabel('n
 chk('and a hyphenated one still splits', 'Social Network', c.catLabel('social-network'));
 chk('an empty category is still Unclassified', 'Unclassified', c.catLabel(''));
 
+head('TILE LETTERS: a name in any script must produce a letter from that script');
+
+// THE DEFECT, found 2026-08-31 by rendering the real component and looking at
+// it. tile() stripped leading characters with /^[^0-9A-Za-z]+/, an ASCII class,
+// so a name in any non-Latin script was consumed entirely and fell through to
+// the '?' fallback. Every Chinese, Japanese, Korean, Russian, Greek, Arabic and
+// Hebrew name rendered an identical question-mark tile.
+//
+// It was never a translation bug. Any LAN client with a non-Latin DHCP hostname
+// hit it on every release shipped so far; accepting a zh_Hans catalogue would
+// have turned an occasional case into a universal one.
+//
+// SABOTAGE: put the ASCII class back. The three non-Latin rows go red and every
+// Latin row stays green, which is the asymmetry that matters.
+chk('a Latin name is unchanged', 'R', textOf(c.tile('Router', 'Router')));
+chk('and a hyphenated one', 'K', textOf(c.tile('kitchen-pi', 'kitchen-pi')));
+chk('Chinese yields a Chinese character', '路',
+    textOf(c.tile('路由器', '路由器')));
+chk('Japanese yields a Japanese character', '日',
+    textOf(c.tile('日本語', '日本語')));
+chk('Cyrillic yields a Cyrillic character, upper-cased', 'Р',
+    textOf(c.tile('Русский',
+                  'Русский')));
+
+// The strip must still do its job, and the fallback must still exist. A fix
+// that simply removed the strip would pass every row above.
+//
+// SABOTAGE: delete the .replace() entirely. This row goes red.
+chk('leading punctuation is still stripped', 'W', textOf(c.tile('...weird', 'x')));
+// SABOTAGE: replace the '?' fallback with ''. This row goes red.
+chk('a nameless tile still falls back', '?', textOf(c.tile('', 'x')));
+
 head('LABELS ARE TRANSLATABLE, WHICH IS NOT WHAT THE CHECKS ABOVE PROVE');
 
 // THE DEFECT, found 2026-08-30, reported by @ntbowen against 1.1.0.
