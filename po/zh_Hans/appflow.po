@@ -46,19 +46,19 @@ msgid "12 buckets of 5 min"
 msgstr "12 个 5 分钟区间"
 
 msgid "AI assistants"
-msgstr ""
+msgstr "AI 助手"
 
 msgid "AI developer"
-msgstr ""
+msgstr "AI 开发"
 
 msgid "AI infrastructure"
-msgstr ""
+msgstr "AI 基础设施"
 
 msgid "AI media"
-msgstr ""
+msgstr "AI 媒体"
 
 msgid "Adult"
-msgstr ""
+msgstr "成人内容"
 
 msgid "Advertiser"
 msgstr "广告"
@@ -85,7 +85,7 @@ msgid "Application"
 msgstr "应用"
 
 msgid "Authentication"
-msgstr ""
+msgstr "身份验证"
 
 msgid "Business"
 msgstr "商务"
@@ -118,7 +118,7 @@ msgid "Collecting samples…"
 msgstr "正在采集样本…"
 
 msgid "Collector state unknown"
-msgstr ""
+msgstr "采集器状态未知"
 
 msgid "Collector uptime: %s"
 msgstr "采集器运行时长：%s"
@@ -130,13 +130,13 @@ msgid "Current rate"
 msgstr "当前速率"
 
 msgid "Cybersecurity"
-msgstr ""
+msgstr "网络安全"
 
 msgid "Data usage"
 msgstr "数据用量"
 
 msgid "Database"
-msgstr ""
+msgstr "数据库"
 
 msgid "Details"
 msgstr "详情"
@@ -145,7 +145,7 @@ msgid "Device"
 msgstr "设备"
 
 msgid "Device: %s"
-msgstr ""
+msgstr "设备：%s"
 
 msgid "Devices"
 msgstr "设备"
@@ -160,10 +160,10 @@ msgid "Downloaded"
 msgstr "已下载"
 
 msgid "Education"
-msgstr ""
+msgstr "教育"
 
 msgid "Entertainment"
-msgstr ""
+msgstr "娱乐"
 
 msgid "File Server"
 msgstr "文件服务器"
@@ -172,10 +172,10 @@ msgid "File Sharing"
 msgstr "文件共享"
 
 msgid "Filter by application or category"
-msgstr ""
+msgstr "按应用或分类筛选"
 
 msgid "Filter by device name, MAC or IP"
-msgstr ""
+msgstr "按设备名称、MAC 或 IP 筛选"
 
 msgid "Financial"
 msgstr "金融"
@@ -184,16 +184,16 @@ msgid "Flows tracked: %d"
 msgstr "已跟踪流数：%d"
 
 msgid "Gambling"
-msgstr ""
+msgstr "博彩"
 
 msgid "Games"
 msgstr "游戏"
 
 msgid "Government"
-msgstr ""
+msgstr "政府"
 
 msgid "Grant access to per-application traffic statistics. The 'apps' method is granted because the overview drills into a device to show what it is doing; it returns an aggregate per device and application from the live flow table. 'flows' remains ungranted: that is the per-connection table, with remote addresses and ports."
-msgstr ""
+msgstr "授予访问按应用流量统计数据的权限。由于概览页面会深入查看设备以显示其活动，因此授予了“apps”方法；该方法根据实时流量表返回按设备和应用汇总的数据。“flows”方法仍未授权，因为它提供的是包含远程地址和端口的逐连接数据。"
 
 msgid "Hosting"
 msgstr "托管"
@@ -220,10 +220,10 @@ msgid "Mail"
 msgstr "邮件"
 
 msgid "Malware"
-msgstr ""
+msgstr "恶意软件"
 
 msgid "Media"
-msgstr ""
+msgstr "媒体"
 
 msgid "Media Provider"
 msgstr "媒体服务商"
@@ -253,7 +253,7 @@ msgid "No application matches \"%s\"."
 msgstr "没有匹配“%s”的应用。"
 
 msgid "No application matches that filter."
-msgstr ""
+msgstr "没有与该筛选条件匹配的应用。"
 
 msgid "No application traffic in the current window."
 msgstr "当前时间窗口内没有应用流量。"
@@ -268,7 +268,7 @@ msgid "No data"
 msgstr "暂无数据"
 
 msgid "No device matches that filter."
-msgstr ""
+msgstr "没有与该筛选条件匹配的设备。"
 
 msgid "No per-device breakdown available for this application."
 msgstr "该应用暂无按设备的明细数据。"
@@ -298,19 +298,19 @@ msgid "Per-application totals for the last hour, aggregated on the router from t
 msgstr "最近一小时内按应用汇总的流量总量，由路由器根据 Netify Agent 的分类结果统计得出。选择某一行可查看按设备的明细。"
 
 msgid "Portal"
-msgstr ""
+msgstr "门户"
 
 msgid "Printing"
-msgstr ""
+msgstr "打印"
 
 msgid "Proxy"
-msgstr ""
+msgstr "代理"
 
 msgid "Recreation"
-msgstr ""
+msgstr "休闲"
 
 msgid "Reference"
-msgstr ""
+msgstr "参考资料"
 
 msgid "Remote Desktop"
 msgstr "远程桌面"
@@ -325,25 +325,25 @@ msgid "Share"
 msgstr "占比"
 
 msgid "Share of traffic by category"
-msgstr ""
+msgstr "各分类的流量占比"
 
 msgid "Shopping"
 msgstr "购物"
 
 msgid "Show all devices"
-msgstr ""
+msgstr "显示所有设备"
 
 msgid "Show only %s"
-msgstr ""
+msgstr "仅显示 %s"
 
 msgid "Show per-device details"
 msgstr "显示按设备的详情"
 
 msgid "Show per-device details for %s"
-msgstr ""
+msgstr "显示 %s 的设备明细"
 
 msgid "Show what %s is doing"
-msgstr ""
+msgstr "显示 %s 的活动"
 
 msgid "Showing the first %d applications; narrow the search to see the rest."
 msgstr "仅显示前 %d 个应用；请缩小搜索范围以查看其余应用。"
@@ -355,13 +355,13 @@ msgid "Sort by %s"
 msgstr "按 %s 排序"
 
 msgid "Sports"
-msgstr ""
+msgstr "体育"
 
 msgid "Start typing a device name, MAC address or IP to find it. Click a device to see what it is doing in the applications list above. Press Clear to see all devices again."
-msgstr ""
+msgstr "输入设备名称、MAC 地址或 IP 即可查找设备。点击设备可在上方应用列表中查看其活动。点击“清除”可再次显示所有设备。"
 
 msgid "Start typing an application or category name to show only that traffic, or click a category in the Categories panel. Prefix a word with a minus to exclude it instead, for example -netflix. Press Clear to see all traffic again."
-msgstr ""
+msgstr "输入应用或分类名称以仅显示相应流量，也可点击“分类”面板中的分类。在词语前添加减号可将其排除，例如 -netflix。点击“清除”可再次显示全部流量。"
 
 msgid "Statistics"
 msgstr "统计"
@@ -373,7 +373,7 @@ msgid "Technology"
 msgstr "科技"
 
 msgid "Telco"
-msgstr ""
+msgstr "电信"
 
 msgid "The AppFlow collector could not be reached over ubus, so there is no traffic data to show. Start the service and this page picks it up automatically."
 msgstr "无法通过 ubus 连接到 AppFlow 采集器，因此没有可显示的流量数据。启动该服务后，此页面会自动获取数据。"
@@ -400,10 +400,10 @@ msgid "Total"
 msgstr "总计"
 
 msgid "Traffic over time"
-msgstr ""
+msgstr "流量趋势"
 
 msgid "Traffic per interval"
-msgstr ""
+msgstr "每个时间区间的流量"
 
 msgid "Unclassified"
 msgstr "未分类"
@@ -424,7 +424,7 @@ msgid "Uploaded"
 msgstr "已上传"
 
 msgid "VPN"
-msgstr ""
+msgstr "VPN"
 
 msgid "VPN & Proxy"
 msgstr "VPN 与代理"
@@ -442,7 +442,7 @@ msgid "appflowd is running, but this LuCI session was refused access to it over 
 msgstr "appflowd 正在运行，但当前 LuCI 会话通过 ubus 访问它时被拒绝（权限不足）。这是 ACL 权限问题，而非服务未启动：请确认已安装 luci-app-appflow 的 ACL 并重新加载 rpcd。"
 
 msgid "by cumulative bytes"
-msgstr ""
+msgstr "按累计字节数"
 
 msgid "by current rate"
 msgstr "按当前速率"
@@ -454,7 +454,7 @@ msgid "last 60 minutes"
 msgstr "最近 60 分钟"
 
 msgid "matching the filter, from flows in progress"
-msgstr ""
+msgstr "匹配筛选条件，来自进行中的流"
 
 msgid "netifyd %s"
 msgstr "netifyd %s"
@@ -463,10 +463,10 @@ msgid "now"
 msgstr "现在"
 
 msgid "on %s, from flows in progress"
-msgstr ""
+msgstr "在 %s 上，来自进行中的流"
 
 msgid "router"
-msgstr "路由器"
+msgstr "本机"
 
 msgid "sum of all applications"
 msgstr "所有应用的总和"
