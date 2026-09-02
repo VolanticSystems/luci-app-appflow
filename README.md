@@ -10,7 +10,39 @@ down per device, live in LuCI, built entirely on open components.
 > tested on real hardware, with byte-attribution behavior measured rather than
 > assumed. Read *Known limitations* below before installing: several are
 > inherent to the DPI engine, and one affects anyone who restarts the service.
-> Not currently in the OpenWrt feeds, so it must be built from source.
+> Not in the OpenWrt feeds yet, so the package below is unsigned.
+
+## Install
+
+One file, every device. The package is `noarch` — only JavaScript and ucode
+inside — and the same `.apk` is verified installing on both aarch64 and
+arm_cortex-a15 hardware.
+
+    wget https://github.com/VolanticSystems/luci-app-appflow/releases/download/v1.1.2/luci-app-appflow-1.1.2-r1.apk
+    apk add --allow-untrusted ./luci-app-appflow-1.1.2-r1.apk
+    /etc/init.d/appflowd enable && /etc/init.d/appflowd start
+
+Needs OpenWrt 25.12 or newer and `netifyd`. `--allow-untrusted` is required
+because this is not signed by the OpenWrt build key. Optional icon pack and
+Simplified Chinese translation are on the same
+[releases page](https://github.com/VolanticSystems/luci-app-appflow/releases).
+
+Prefer to build it yourself? See *Building from source* below.
+
+## Screenshots
+
+Live overview:
+
+![Overview](docs/overview.png)
+
+Statistics (past hour):
+
+![Statistics](docs/statistics.png)
+
+Filtering. Typing `ai` narrows both lists to AI traffic, and the device panel
+switches to what currently-tracked flows account for:
+
+![Filtering by AI](docs/ai-filter.png)
 
 ## How it works
 
@@ -73,21 +105,6 @@ github and wikipedia. Neither interfered with the other. If you want durable
 per-host accounting, nlbwmon does it better and appflow does not attempt it;
 if you want to know which *application* is doing it right now, that is the
 question this package exists to answer.
-
-## Screenshots
-
-Live overview:
-
-![Overview](docs/overview.png)
-
-Statistics (past hour):
-
-![Statistics](docs/statistics.png)
-
-Filtering. Typing `ai` narrows both lists to AI traffic, and the device panel
-switches to what currently-tracked flows account for:
-
-![Filtering by AI](docs/ai-filter.png)
 
 ## AI services get their own rows
 
@@ -373,11 +390,11 @@ Tested on a Linksys EA8500 (ipq806x). It is architecture-independent
 (`LUCI_PKGARCH:=all`), and CI builds it for `arm_cortex-a15_neon-vfpv4` and
 `aarch64_cortex-a53`.
 
-## Install
+## Building from source
 
-**This package is not in the official OpenWrt feeds**, so there is no
-one-line install from a stock device. Build it with the OpenWrt SDK for your
-release and architecture, then install the resulting package.
+Prefer to compile it yourself, or running an OpenWrt release older than
+25.12 where the `.apk` above will not install? Build it with the OpenWrt
+SDK for your release, then install the resulting package.
 
 Build:
 
