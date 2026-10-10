@@ -135,7 +135,7 @@ participate and throttling is impossible by construction.
   accountable byte counts for sub-interval flows.
 
   **CORRECTED 2026-08-25. The two paragraphs below understated this, and the
-  review was right.** Once `purge_only_rescued` was instrumented and left
+  reviewers were right.** Once `purge_only_rescued` was instrumented and left
   running against ordinary traffic, it reported **13 purge-only flows out of
   1,341 seen, 0.97%**. Flows purged without ever receiving a `flow_stats` DO
   occur on netifyd 4.4.7. Before the defensive path was added, every one of them
