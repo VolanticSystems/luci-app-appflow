@@ -18,8 +18,8 @@ One file, every device. The package is `noarch` — only JavaScript and ucode
 inside — and the same `.apk` is verified installing on both aarch64 and
 arm_cortex-a15 hardware.
 
-    wget -O luci-app-appflow-1.1.2-r1.apk https://github.com/VolanticSystems/luci-app-appflow/releases/download/v1.1.2/luci-app-appflow-1.1.2-r1.apk
-    apk add --allow-untrusted ./luci-app-appflow-1.1.2-r1.apk
+    wget -O luci-app-appflow-1.1.3-r1.apk https://github.com/VolanticSystems/luci-app-appflow/releases/download/v1.1.3/luci-app-appflow-1.1.3-r1.apk
+    apk add --allow-untrusted ./luci-app-appflow-1.1.3-r1.apk
     /etc/init.d/appflowd enable && /etc/init.d/appflowd start
 
 Needs OpenWrt 25.12 or newer and `netifyd`. `--allow-untrusted` is required
@@ -381,7 +381,14 @@ red, written before the assertion. Details in
 ## Requirements
 
 - OpenWrt with `netifyd` available (developed and tested against **OpenWrt
-  25.12.5** with **netifyd 4.4.7**).
+  25.12.5** with **netifyd 4.4.7**, the version OpenWrt packages).
+- **netifyd 5.x** works from 1.1.3, tested on x86 with Netify's own 5.2
+  packages. It needs two of its plugins switched on, which ship off:
+  `netifyd --enable-plugin proc-core`, `netifyd --enable-plugin sink-socket`,
+  and in `/etc/netifyd/netify-proc-core.json` set
+  `sinks.sink-socket.default.enable` to `true`. appflow finds the 5.x socket
+  by itself. If it is connected but nothing arrives for a minute, the status
+  page says so and the log says what to switch on.
 - Enough headroom to run DPI. Measured on the test device under light load:
   **netifyd** around 17 MB VSZ, **appflowd** around 2 MB VSZ, negligible CPU
   for both. netifyd is the expensive component; appflow adds little on top.

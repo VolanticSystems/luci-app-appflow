@@ -114,6 +114,7 @@ ORIG_FLOWMAX=""
 head2() { printf '\n=== %s ===\n' "$*"; }
 ok()   { PASS=$((PASS+1)); printf '  PASS  %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$*"; }
+skip() { printf '  SKIP  %s\n' "$*"; }
 note() { printf '        %s\n' "$*"; }
 
 # chk <description> <expected> <actual>
@@ -1232,6 +1233,103 @@ test_router_origin() {
 	rm -f "$CT"
 }
 
+test_netify5() {
+	head2 "WHAT REAL NETIFYD SENDS: NO ADDRESSES ON UPDATES, NEW 5.x MESSAGE TYPES"
+
+	# THE DEFECT, found 2026-10-12 in a Docker test against netifyd 4.4.7 and
+	# 5.2. A flow_stats event carries the digest and the byte counters and
+	# nothing else: no ports, no addresses. The fake events everywhere else in
+	# this suite put local_ip/other_ip on every flow_stats, which real netifyd
+	# never does, and that is why the suite stayed green while router flows
+	# identified before the first LAN flow were silently shadowed: reshadow()
+	# re-asked conntrack with a key built from the update's (absent) addresses.
+	local RIP RMAC CT
+	CT=/tmp/appflow-ct-fixture5
+	RIP=$(jsonfilter -i /var/run/netifyd/status.json -e '@.interfaces.wan.addr[0]' 2>/dev/null)
+	case "$RIP" in
+		*.*) : ;;
+		*) RIP=$(jsonfilter -i /var/run/netifyd/status.json -e '@.interfaces.wan.addr[1]' 2>/dev/null) ;;
+	esac
+	RMAC=$(jsonfilter -i /var/run/netifyd/status.json -e '@.interfaces.wan.mac' 2>/dev/null)
+
+	if [ -n "$RIP" ] && [ -n "$RMAC" ]; then
+		printf 'ipv4 2 tcp 6 431999 ESTABLISHED src=%s dst=93.184.216.34 sport=40005 dport=443 packets=4 bytes=400 src=93.184.216.34 dst=%s sport=443 dport=40005 packets=4 bytes=400 [ASSURED] mark=0 zone=0 use=2\n' \
+			"$RIP" "$RIP" > "$CT"
+		uci set appflow.main.conntrack_path="$CT"
+		uci commit appflow
+
+		# Order is the point: the router's flow is identified BEFORE any LAN
+		# flow, so saw_internal is still false and nothing is decided then.
+		# The LAN flow arrives, saw_internal goes true, and the router flow's
+		# later updates, carrying no addresses, are what re-check conntrack.
+		{
+			hello
+			printf '{"type":"flow","internal":false,"interface":"wan","flow":{"digest":"N5R00001","local_ip":"%s","local_mac":"%s","other_ip":"93.184.216.34","other_mac":"02:00:00:00:00:ff","local_port":40005,"other_port":443,"ip_protocol":6,"detected_application":0,"detected_application_name":"","detected_protocol":91,"detected_protocol_name":"TLS","category":{"application":10,"protocol":20},"local_bytes":0,"other_bytes":0,"total_bytes":0}}\n' "$RIP" "$RMAC"
+			flow_ev N5L00001 1001 lan-client 400 600 1000 true 02:00:00:00:00:aa
+			printf '{"type":"flow_stats","internal":false,"interface":"wan","flow":{"digest":"N5R00001","local_bytes":700,"other_bytes":1300,"total_bytes":2000}}\n'
+			printf '{"type":"flow_stats","internal":false,"interface":"wan","flow":{"digest":"N5R00001","local_bytes":700,"other_bytes":1300,"total_bytes":4000}}\n'
+		} > "$EV"
+		feed_and_settle
+
+		# SABOTAGE: delete the two `fr.local_ip`/`fr.other_ip` assignments in
+		# flow_identify(), or make ct_nat_twin() key off f.local_ip again. The
+		# router row then reads MISSING, which is what 1.1.2 did.
+		chk "a router flow seen before any LAN flow still counts" "4000" "$(dev_bytes router)"
+		uci delete appflow.main.conntrack_path 2>/dev/null
+		uci commit appflow
+		rm -f "$CT"
+	else
+		skip "no WAN address/mac in netifyd status; cannot forge a router flow"
+	fi
+
+	# THE SHORTFALL, seen once in 133 updates on netifyd 5.2: total_bytes grew
+	# by more than local_bytes + other_bytes. The difference showed as leaked.
+	#
+	#   first update   local 400  other 600  total 1000
+	#   second update  local 100  other 100  total 1500   (grew 500, deltas 200)
+	#
+	# Expected: the device gets 1500, the cumulative total, and nothing leaks.
+	# SABOTAGE: delete the `sum > 0 && sum < dt` branch in flow_update(). The
+	# device then reads 1200 and leaked reads 300.
+	{
+		hello
+		flow_ev N5S00001 1001 lan-client 400 600 1000 true 02:00:00:00:00:bb
+		printf '{"type":"flow_stats","internal":true,"interface":"br-lan","flow":{"digest":"N5S00001","local_bytes":100,"other_bytes":100,"total_bytes":1500}}\n'
+	} > "$EV"
+	feed_and_settle
+	chk "a shortfall update still credits the full growth" "1500" "$(dev_bytes 02:00:00:00:00:bb)"
+	chk "and nothing is reported as leaked" "0" "$(field bytes leaked)"
+
+	# 5.x sends flow_dpi_update / flow_dpi_complete as classification firms
+	# up. They carry nothing appflow needs; they must not count as unknown.
+	# SABOTAGE: drop them from HANDLERS. unknown then reads 2.
+	{
+		hello
+		flow_ev N5D00001 1001 lan-client 400 600 1000 true 02:00:00:00:00:cc
+		printf '{"type":"flow_dpi_update","flow":{"digest":"N5D00001"}}\n'
+		printf '{"type":"flow_dpi_complete","flow":{"digest":"N5D00001"}}\n'
+	} > "$EV"
+	feed_and_settle
+	chk "5.x classification events are not counted as unknown" "0" "$(field events unknown)"
+
+	# Connected but silent: on 5.x the old socket path accepts a connection
+	# and sends nothing, and that read as a healthy idle router. A minute with
+	# no events at all must raise the flag. One hello, then nothing; the
+	# housekeeping sweep runs every 15 s, so wait past 60 + 15.
+	# SABOTAGE: never set `silent` in housekeeping(). The flag then reads false.
+	#
+	# The fake hangs up after HOLD_S, appflowd reconnects and the fake replays
+	# the hello, which is not silence. The first run of this check failed that
+	# way, against a daemon that was right. Hold the line past the wait here.
+	local HOLD_S=150
+	hello > "$EV"
+	feed_and_settle
+	note "waiting 80 s for the silence to register"
+	sleep 80
+	chk "a connection that sends nothing is flagged silent" "true" \
+	    "$(st | jsonfilter -e '@.socket.silent' 2>/dev/null)"
+}
+
 test_ai_breakout() {
 	head2 "AI BREAKOUT (hostname matching, and the things it must NOT match)"
 
@@ -1860,12 +1958,13 @@ case "$GROUP" in
 	acl)          test_acl ;;
 	ai)           test_ai_breakout ;;
 	router)       test_router_origin ;;
+	netify5)      test_netify5 ;;
 	hostmap)      test_hostmap ;;
 	drilldown)    test_drilldown ;;
 	all)          test_conservation; test_protocol; test_bounds
 	              test_attribution; test_hostile; test_lifecycle; test_acl
 	              test_ai_breakout; test_hostmap; test_drilldown
-	              test_router_origin ;;
+	              test_router_origin; test_netify5 ;;
 	*)            printf "unknown group '%s'\n" "$GROUP"; exit 2 ;;
 esac
 

@@ -58,7 +58,21 @@ const LOG_REPEAT_MS = 60000;     // identical-message log suppression window
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
-const CATEGORY_FILE = "/etc/netify.d/netify-categories.json";
+// netifyd 4.4 keeps its category list under /etc/netify.d; 5.x moved it to
+// /etc/netifyd, same format. Without the second path every category on 5.x
+// read "unclassified" (Docker test, 2026-10-12).
+const CATEGORY_FILES = [ "/etc/netify.d/netify-categories.json",
+                         "/etc/netifyd/netify-categories.json" ];
+
+// netifyd 5.x moved the JSON export out of the agent into the
+// netify-sink-socket plugin, which listens here. The old path still exists on
+// 5.x but is a different socket that accepts a connection and sends nothing,
+// so appflowd looked connected and idle while receiving nothing at all. When
+// the configured path is the 4.4 default and the 5.x socket exists, use the
+// 5.x one; an explicitly configured path is always used as given.
+const LEGACY_SOCKET = "/var/run/netifyd/netifyd.sock";
+const SINK_SOCKET = "/var/run/netifyd/netify-sink.sock";
+const SILENT_MS = 60000;         // connected with no events this long: warn
 const LEASE_FILE = "/tmp/dhcp.leases";
 const STATUS_FILE = "/var/run/netifyd/status.json";
 const CONNTRACK_FILE = "/proc/net/nf_conntrack";
@@ -101,6 +115,10 @@ let sock_fd = null;              // uloop fd handle
 let rxbuf = "";                  // partial line carry-over
 let connected = false;
 let ever_connected = false;      // distinguishes the first connect from reconnects
+let hello_logged = false;        // agent_hello logged on this connection
+let active_path = null;          // the socket actually connected to
+let connected_ms = 0;            // when this connection was made
+let silent = false;              // connected, but nothing has arrived
 let backoff_ms = RECONNECT_MIN_MS;
 let retry_timer = null;
 
@@ -664,14 +682,20 @@ function display_name(tag) {
 }
 
 function load_categories() {
-	let raw;
-	try {
-		raw = fs.readfile(CATEGORY_FILE);
-	} catch (e) {
-		raw = null;
+	let raw, path;
+	for (let p in CATEGORY_FILES) {
+		try {
+			raw = fs.readfile(p);
+		} catch (e) {
+			raw = null;
+		}
+		if (raw) {
+			path = p;
+			break;
+		}
 	}
 	if (!raw) {
-		logonce("cats", "warn", "category names unavailable: %s", CATEGORY_FILE);
+		logonce("cats", "warn", "category names unavailable: %s", join(" or ", CATEGORY_FILES));
 		return;
 	}
 
@@ -679,7 +703,7 @@ function load_categories() {
 	try {
 		obj = json(raw);
 	} catch (e) {
-		logmsg("warn", "%s: parse error: %s", CATEGORY_FILE, e);
+		logmsg("warn", "%s: parse error: %s", path, e);
 		return;
 	}
 
@@ -943,8 +967,9 @@ function ct_load(now, force) {
 function ct_nat_twin(f, now, fr) {
 	// THE PORTS COME FROM THE FLOW RECORD, NOT THE EVENT, AND THAT IS THE WHOLE
 	// FIX. netifyd puts local_port/other_port on the initial `flow` event and
-	// on nothing afterwards: a `flow_stats` payload carries addresses and byte
-	// counters only. This key was built straight off the event, so every call
+	// on nothing afterwards: a `flow_stats` payload carries byte counters
+	// only. (This comment once said it carried addresses too. It does not, on
+	// 4.4.7 or 5.x, so the addresses now come from the record as well.) This key was built straight off the event, so every call
 	// made from an update produced "...|93.184.216.34|192.168.72.10||" with two
 	// empty fields, matched nothing, and returned null.
 	//
@@ -959,7 +984,9 @@ function ct_nat_twin(f, now, fr) {
 	// missing on the bench. See tests/protocol-suite.sh `router`.
 	let lp = (fr != null && fr.local_port != null) ? fr.local_port : f.local_port;
 	let op = (fr != null && fr.other_port != null) ? fr.other_port : f.other_port;
-	let key = (f.other_ip ?? "") + "|" + (f.local_ip ?? "") + "|" +
+	let lip = (fr != null && fr.local_ip != null) ? fr.local_ip : f.local_ip;
+	let oip = (fr != null && fr.other_ip != null) ? fr.other_ip : f.other_ip;
+	let key = (oip ?? "") + "|" + (lip ?? "") + "|" +
 	          (op ?? "") + "|" + (lp ?? "");
 	ct_load(now, false);
 	let v = conntrack.entries ? conntrack.map[key] : null;
@@ -1266,6 +1293,14 @@ function flow_identify(fr, ev, f, now) {
 	// ct_nat_twin().
 	if (f.local_port != null) fr.local_port = f.local_port;
 	if (f.other_port != null) fr.other_port = f.other_port;
+	// The addresses too, for the same reason. A `flow_stats` carries neither
+	// ports nor addresses (checked on 4.4.7 and 5.x captures, 2026-10-12), so
+	// a router flow re-checked against conntrack from an update built a key of
+	// empty fields, missed, and was shadowed for the rest of its life. Only
+	// router flows identified before the first LAN flow are re-checked, which
+	// is why the loss was small and showed up after every restart.
+	if (f.local_ip != null) fr.local_ip = f.local_ip;
+	if (f.other_ip != null) fr.other_ip = f.other_ip;
 
 	let lm = lc(f.local_mac ?? ""), om = lc(f.other_mac ?? "");
 	let rl = is_router(lm, f.local_ip), ro = is_router(om, f.other_ip);
@@ -1478,8 +1513,21 @@ function flow_new(digest, ev, f, now, late) {
 
 function ev_hello(ev) {
 	agent.version = ev.agent_version ?? agent.version;
+	// 4.4 sends this once per connection; 5.x repeats it with every status
+	// update, every 15 s, which filled the log (57 lines in 16 minutes). Log
+	// it once per connection.
+	if (hello_logged)
+		return;
+	hello_logged = true;
 	logmsg("info", "netify agent %s connected (%s)",
 	       agent.version ?? "?", ev.build_version ?? "");
+}
+
+// netifyd 5.x sends these as a flow's classification firms up. The `flow`
+// event already carries the final classification in every case captured, and
+// the first flow_stats covers the bytes from the flow's start, so they are
+// accepted and ignored rather than counted as unknown traffic.
+function ev_ignore(ev) {
 }
 
 // In normal operation `names` is bounded by nDPI's catalogue (a few thousand
@@ -1578,6 +1626,14 @@ function flow_update(fr, f, now, final) {
 			// Directional deltas exceed the cumulative growth: clamp them down.
 			dl = (sum > 0) ? int(dl * dt / sum) : 0;
 			do_ = dt - dl;
+		} else if (sum > 0 && sum < dt) {
+			// The opposite: the cumulative counter grew by more than the two
+			// directional deltas add up to. Seen once in 133 updates on a slow,
+			// retransmitting flow under netifyd 5.2 (2026-10-12, 13,254 bytes),
+			// and it showed as `leaked`. Scale up in the same direction ratio,
+			// mirroring the clamp above, so the total is what netifyd reported.
+			dl = int(dl * dt / sum);
+			do_ = dt - dl;
 		} else if (sum == 0 && dt > 0) {
 			// The cumulative counter advanced but this update carries no
 			// directional bytes.  This is the flow_purge case on 4.4.7:
@@ -1670,7 +1726,9 @@ function ev_purge(ev, f, now) {
 const HANDLERS = {
 	agent_hello: ev_hello,
 	definitions: ev_definitions,
-	agent_status: ev_agent_status
+	agent_status: ev_agent_status,
+	flow_dpi_update: ev_ignore,
+	flow_dpi_complete: ev_ignore
 };
 
 const FLOW_HANDLERS = {
@@ -1836,18 +1894,25 @@ schedule_reconnect = function() {
 };
 
 connect = function() {
+	active_path = cfg.socket_path;
+	if (active_path == LEGACY_SOCKET && fs.stat(SINK_SOCKET) != null)
+		active_path = SINK_SOCKET;
+
 	try {
-		sock = socket.connect(cfg.socket_path);
+		sock = socket.connect(active_path);
 	} catch (e) {
 		sock = null;
 	}
 
 	if (!sock) {
 		stats.connect_fail++;
-		logonce("noconn", "warn", "waiting for netifyd on %s", cfg.socket_path);
+		logonce("noconn", "warn", "waiting for netifyd on %s", active_path);
 		schedule_reconnect();
 		return;
 	}
+	hello_logged = false;
+	silent = false;
+	connected_ms = now_ms();
 
 	sock_fd = uloop.handle(sock, on_readable, uloop.ULOOP_READ);
 	// Count reconnects, not the first connect, so `socket.reconnects` reads as
@@ -1864,7 +1929,7 @@ connect = function() {
 	// stream re-establishes it from its own events.
 	saw_internal = false;
 	router_bootstrap();
-	logmsg("info", "connected to %s", cfg.socket_path);
+	logmsg("info", "connected to %s", active_path);
 };
 
 /* ------------------------------------------------------------------ *
@@ -1920,6 +1985,15 @@ prune = function(now, force) {
 function housekeeping() {
 	let now = now_ms();
 	stats.sweeps++;
+
+	// Connected but silent. netifyd sends a status update every 15 s, so a
+	// minute with nothing at all means this socket is not the data stream;
+	// on 5.x that is the old path while the netify-sink-socket plugin is off.
+	// Without this it read as a healthy, idle router.
+	let last = (stats.last_event_ms > connected_ms) ? stats.last_event_ms : connected_ms;
+	silent = connected && (now - last) > SILENT_MS;
+	if (silent)
+		logonce("silent", "warn", "connected to %s but nothing has arrived for %d s; on netifyd 5.x enable the proc-core and sink-socket plugins", active_path, int((now - last) / 1000));
 	let slot = int(now / SERIES_MS), dslot = int(now / DEVSER_MS);
 
 	prune(now, false);
@@ -2396,7 +2470,7 @@ function m_status(req) {
 	r.version = VERSION;
 	r.uptime = int((mono_ms() - start_mono) / 1000);
 	r.started_at = start_ms;
-	r.socket = { path: cfg.socket_path, connected: connected, reconnects: stats.reconnects,
+	r.socket = { path: active_path ?? cfg.socket_path, connected: connected, silent: silent, reconnects: stats.reconnects,
 	             connect_failures: stats.connect_fail };
 	r.config = { flow_max: cfg.flow_max, rate_window: cfg.rate_window,
 	             top_n: cfg.top_n, idle_timeout: cfg.idle_timeout,

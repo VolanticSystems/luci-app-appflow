@@ -982,3 +982,41 @@ flow table. It is more revealing than either list alone, since it says which
 device used which application, and it is still far short of `flows`: no remote
 address, no port, no per-connection record. **`flows` remains unbound and
 ungranted.**
+
+## 16. Shipped in 1.1.3: netifyd 5.x, and a Router-row loss on every restart
+
+Found with a Docker test on 2026-10-12: OpenWrt 25.12.5 for x86 with Netify's
+own netifyd 5.2 packages, and the 4.4.7 from OpenWrt's feed as a control.
+
+**On 5.x, appflow looked healthy and received nothing.** 5.x moved the JSON
+export out of the agent into the `netify-sink-socket` plugin, which listens on
+`/var/run/netifyd/netify-sink.sock`. The old path still exists but is a
+different socket that accepts a connection and sends nothing, so status read
+"connected, 0 events": a quiet router. appflowd now uses the 5.x socket when
+the configured path is the 4.4 default and the 5.x socket exists, and flags a
+connection that has delivered nothing for a minute (`socket.silent`, plus a log
+line naming the plugins to enable). netifyd sends a status event every 15 s, so
+a silent minute is never normal.
+
+**Other 5.x differences handled:** the category list moved to
+`/etc/netifyd/netify-categories.json` (same format; without it every category
+read unclassified); `flow_dpi_update` and `flow_dpi_complete` are accepted and
+ignored rather than counted as unknown, since the `flow` event already carries
+the classification and the first `flow_stats` covers the bytes from the start;
+`agent_hello` now repeats every 15 s and is logged once per connection.
+
+**A shortfall leak.** Once in 133 updates on a slow, retransmitting flow, 5.x
+reported `total_bytes` growth larger than `local_bytes + other_bytes`, and the
+difference showed as `leaked`. The deltas are now scaled up to the growth in
+the same direction ratio, mirroring the existing clamp for the opposite case.
+
+**The Router row lost flows after every restart, on 4.4.7 too.** §13's fix
+kept a flow's ports on its record because `flow_stats` carries none. It
+carries no addresses either, on both versions, though a comment said it did.
+A router flow identified before the first LAN flow is re-checked against
+conntrack later, from an update, with a key of empty address fields; it
+missed, and the flow was shadowed for the rest of its life. The addresses are
+now kept on the record too. The protocol suite's own fake events had put
+addresses on every `flow_stats`, which real netifyd never does, and that is
+why it stayed green; the new `netify5` group sends what netifyd actually
+sends, and all five of its checks fail against the previous daemon.

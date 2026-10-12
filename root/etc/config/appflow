@@ -1,5 +1,8 @@
 config appflow 'main'
 	# Netify Agent JSON export socket (netifyd.conf: [socket] listen_path[0]).
+	# netifyd 5.x serves it from the sink-socket plugin instead, at
+	# /var/run/netifyd/netify-sink.sock; with this left at the 4.4 default,
+	# appflowd uses that one automatically when it exists.
 	option socket_path '/var/run/netifyd/netifyd.sock'
 
 	# Maximum concurrently tracked flows. The flow table is the daemon's only
